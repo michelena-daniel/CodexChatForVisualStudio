@@ -1,0 +1,5 @@
+<Project>
+  <!-- Import after Microsoft.Common.targets has established SDK-style output paths. -->
+  <Import Project="$(PkgMicrosoft_VSSDK_BuildTools)\tools\vssdk\Microsoft.VsSDK.targets"
+          Condition="'$(MSBuildProjectName)' == 'CodexForVS.Extension' and Exists('$(PkgMicrosoft_VSSDK_BuildTools)\tools\vssdk\Microsoft.VsSDK.targets')" />
+</Project>

@@ -1,0 +1,54 @@
+<UserControl x:Class="CodexForVS.Extension.CodexChatView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Grid Margin="10">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+    <DockPanel LastChildFill="False">
+      <TextBlock FontSize="16" FontWeight="SemiBold" Text="Codex Chat" />
+      <Button DockPanel.Dock="Right" Margin="6,0,0,0" Padding="8,2" Command="{Binding ConnectCommand}" Content="Connect" />
+      <Button DockPanel.Dock="Right" Margin="6,0,0,0" Padding="8,2" Command="{Binding NewConversationCommand}" Content="New Conversation" />
+      <Button DockPanel.Dock="Right" Margin="6,0,0,0" Padding="8,2" Command="{Binding SignInCommand}" Content="Sign In" />
+    </DockPanel>
+    <StackPanel Grid.Row="1" Margin="0,8,0,8">
+      <TextBlock Text="{Binding StatusMessage}" TextWrapping="Wrap" />
+      <TextBlock FontSize="11" Opacity="0.75" Text="{Binding WorkspaceName}" />
+      <TextBlock FontSize="11" Opacity="0.75" Text="{Binding WorkspacePath}" TextTrimming="CharacterEllipsis" />
+      <TextBlock Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}" FontWeight="SemiBold" Text="{Binding ErrorMessage}" TextWrapping="Wrap" />
+    </StackPanel>
+    <Border Grid.Row="2" BorderBrush="{DynamicResource {x:Static SystemColors.ControlDarkBrushKey}}" BorderThickness="1" CornerRadius="3">
+      <ListBox x:Name="MessagesList" ItemsSource="{Binding Messages}" BorderThickness="0" Background="Transparent">
+        <ListBox.ItemTemplate>
+          <DataTemplate>
+            <Border x:Name="MessageBorder" Margin="5" Padding="7" BorderBrush="{DynamicResource {x:Static SystemColors.ControlDarkBrushKey}}" BorderThickness="1" CornerRadius="3">
+              <StackPanel>
+                <TextBlock FontSize="11" FontWeight="SemiBold" Text="{Binding Role}" />
+                <TextBlock Margin="0,3,0,0" TextWrapping="Wrap" Text="{Binding Content}" />
+              </StackPanel>
+            </Border>
+            <DataTemplate.Triggers>
+              <DataTrigger Binding="{Binding Role}" Value="user">
+                <Setter TargetName="MessageBorder" Property="Background" Value="{DynamicResource {x:Static SystemColors.ControlLightBrushKey}}" />
+              </DataTrigger>
+              <DataTrigger Binding="{Binding Role}" Value="tool">
+                <Setter TargetName="MessageBorder" Property="Opacity" Value="0.75" />
+              </DataTrigger>
+            </DataTemplate.Triggers>
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+      </ListBox>
+    </Border>
+    <TextBox Grid.Row="3" Margin="0,8,0,4" MinHeight="58" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}" />
+    <DockPanel Grid.Row="4" LastChildFill="False">
+      <Button DockPanel.Dock="Right" Margin="6,0,0,0" Padding="12,3" Command="{Binding CancelTurnCommand}" Content="Cancel" />
+      <Button DockPanel.Dock="Right" Padding="12,3" Command="{Binding SendMessageCommand}" Content="Send" />
+      <TextBlock VerticalAlignment="Center" Opacity="0.75" Text="Read-only mode: inspection only" />
+    </DockPanel>
+  </Grid>
+</UserControl>

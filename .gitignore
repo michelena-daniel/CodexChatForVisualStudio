@@ -1,0 +1,37 @@
+# Local IDE settings
+.vs/
+*.user
+*.suo
+*.rsuser
+*.sln.docstates
+
+# Build, packaging, and test output
+[Bb]in/
+[Oo]bj/
+TestResults/
+/artifacts/
+*.vsix
+*.nupkg
+*.snupkg
+*.trx
+*.coverage
+*.coveragexml
+
+# Diagnostics from the IDE, CLI, and MSBuild
+*.log
+*.binlog
+*.dmp
+ActivityLog*.xml
+CodexForVS-*-ActivityLog*.xml
+
+# Local environment, Codex credentials, and package signing keys
+.env
+.env.*
+!.env.example
+!.env.template
+auth.json
+.codex/sessions/
+.codex/log/
+*.pfx
+*.p12
+*.key

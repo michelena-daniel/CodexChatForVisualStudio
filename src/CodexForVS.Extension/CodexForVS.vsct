@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable">
+  <Extern href="stdidcmd.h" />
+  <Extern href="vsshlids.h" />
+  <Commands package="guidCodexPackage">
+    <Buttons>
+      <Button guid="guidCodexCommandSet" id="ShowToolWindowCommandId" priority="0x0100" type="Button">
+        <Parent guid="guidSHLMainMenu" id="IDG_VS_WNDO_OTRWNDWS1" />
+        <Strings>
+          <ButtonText>Codex Chat</ButtonText>
+        </Strings>
+      </Button>
+    </Buttons>
+  </Commands>
+  <Symbols>
+    <GuidSymbol name="guidCodexPackage" value="{E4B5CB36-C9C0-4D80-9DC4-73E4C67AC2D6}" />
+    <GuidSymbol name="guidCodexCommandSet" value="{96C54587-1A5A-4E2E-A9A4-432B88EB5D35}">
+      <IDSymbol name="ShowToolWindowCommandId" value="0x0100" />
+    </GuidSymbol>
+  </Symbols>
+</CommandTable>
