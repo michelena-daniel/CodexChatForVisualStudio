@@ -1,5 +1,7 @@
 using System;
 using System.Diagnostics;
+using System.IO;
+using System.Text;
 using System.Threading.Tasks;
 
 namespace CodexForVS.Client;
@@ -12,12 +14,16 @@ public sealed class CodexAppServerProcess : ICodexProcess
     public IJsonRpcTransport Start()
     {
         if (transport is not null) return transport;
-        ProcessStartInfo startInfo = new ProcessStartInfo("codex", "app-server --listen stdio://") { RedirectStandardInput=true, RedirectStandardOutput=true, RedirectStandardError=true, UseShellExecute=false, CreateNoWindow=true };
+        UTF8Encoding utf8 = new UTF8Encoding(false);
+        ProcessStartInfo startInfo = new ProcessStartInfo(CodexExecutable.Resolve(), "app-server --listen stdio://") { RedirectStandardInput=true, RedirectStandardOutput=true, RedirectStandardError=true, StandardOutputEncoding=utf8, StandardErrorEncoding=utf8, UseShellExecute=false, CreateNoWindow=true };
+        startInfo.EnvironmentVariables.Remove("OPENAI_API_KEY");
+        startInfo.EnvironmentVariables.Remove("CODEX_API_KEY");
         process = new Process { StartInfo=startInfo, EnableRaisingEvents=true };
         process.Exited += (_,__) => Exited?.Invoke(this,EventArgs.Empty);
         try { if (!process.Start()) throw new InvalidOperationException("Codex App Server did not start."); }
-        catch (Exception error) { process.Dispose(); process=null; throw new InvalidOperationException("Unable to start the Codex CLI. Verify that 'codex' is installed and on PATH.",error); }
-        transport = new JsonlJsonRpcTransport(process.StandardOutput,process.StandardInput);
+        catch (Exception error) { process.Dispose(); process=null; throw new CodexLaunchException("Visual Studio found codex.exe, but Windows could not start it.",error); }
+        // .NET Framework has no ProcessStartInfo.StandardInputEncoding.
+        transport = new JsonlJsonRpcTransport(process.StandardOutput, new StreamWriter(process.StandardInput.BaseStream, utf8));
         _ = ReadErrorsAsync(process.StandardError); return transport;
     }
     private async Task ReadErrorsAsync(System.IO.StreamReader errors) { string? line; while((line=await errors.ReadLineAsync().ConfigureAwait(false)) is not null) StandardErrorReceived?.Invoke(this,line); }

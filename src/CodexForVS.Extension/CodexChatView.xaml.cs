@@ -1,8 +1,7 @@
 using System;
-using System.Collections.Specialized;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.Windows.Controls;
+using System.Windows.Input;
 using CodexForVS.Client;
 
 namespace CodexForVS.Extension;
@@ -14,19 +13,19 @@ public partial class CodexChatView : UserControl
         InitializeComponent();
         DataContext = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         viewModel.AuthenticationUrlAvailable += OpenAuthenticationUrl;
-        viewModel.Messages.CollectionChanged += OnMessagesChanged;
     }
 
-    private void OnMessagesChanged(object sender, NotifyCollectionChangedEventArgs e)
+    private void OnHistoryScrollChanged(object sender, ScrollChangedEventArgs e)
     {
-        if (e.NewItems != null) foreach (object item in e.NewItems) if (item is INotifyPropertyChanged message) message.PropertyChanged += OnMessagePropertyChanged;
-        if (e.OldItems != null) foreach (object item in e.OldItems) if (item is INotifyPropertyChanged message) message.PropertyChanged -= OnMessagePropertyChanged;
-        if (MessagesList.Items.Count > 0) MessagesList.ScrollIntoView(MessagesList.Items[MessagesList.Items.Count - 1]);
+        if (e.ExtentHeightChange > 0) ((ScrollViewer)sender).ScrollToEnd();
     }
 
-    private void OnMessagePropertyChanged(object sender, PropertyChangedEventArgs e)
+    private void OnInputKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.PropertyName == "Content" && MessagesList.Items.Count > 0) MessagesList.ScrollIntoView(MessagesList.Items[MessagesList.Items.Count - 1]);
+        if (e.Key != Key.Enter || Keyboard.Modifiers != ModifierKeys.None) return;
+        e.Handled = true;
+        if (!e.IsRepeat && DataContext is CodexChatViewModel model && model.SendMessageCommand.CanExecute(null!))
+            model.SendMessageCommand.Execute(null!);
     }
 
     private void OpenAuthenticationUrl(object sender, string authenticationUrl)

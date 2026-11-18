@@ -1,62 +1,51 @@
 # Codex for Visual Studio
 
-An M0 scaffold for a local-first Visual Studio extension that will host the official Codex App Server in a dockable **Codex Chat** tool window. No App Server process, authentication, chat transport, Git worktree, or change-application behavior exists yet.
+Version 0.1.9 adds a dockable **Codex Chat** window to Visual Studio. Ask questions about the open solution, read streamed answers, ask follow-ups in the same conversation, and interrupt a response. M1 is read-only.
 
-## Prerequisites
+## Install and open Codex Chat
 
-- Visual Studio 2026 Community 18.10+ with the **Visual Studio extension development** workload. Visual Studio 2022 17.14+ remains a supported secondary target.
-- .NET Framework 4.8 targeting pack (the in-process WPF/VSSDK extension targets `net48`).
-- .NET SDK 9.0.301 or a compatible later SDK, NuGet access, and Git.
-- For M1 onward, the official Codex CLI and an eligible ChatGPT subscription. This project will use `codex app-server`; it will not ask for an OpenAI API key or reuse ChatGPT credentials.
+1. Install the official Codex CLI on Windows. This version was tested with CLI **0.169.0** and **Visual Studio 2026 Community 18.10.3** on x64. The extension looks for `codex.exe` on PATH and understands the Windows npm installation layout. Check the installed version with `codex --version`.
+2. Close Visual Studio, open `CodexForVS.Extension.vsix`, and choose the Visual Studio 2026 instance. Reopen the IDE and load a saved solution.
+3. Select **View → Other Windows → Codex Chat**. Check the displayed solution directory, then click **Connect**. The extension starts the official local Codex App Server. If the CLI already has a ChatGPT login, the window displays **Connected and authenticated**. Otherwise, click **Sign In** and complete the official flow in your browser.
+4. Ask “What does this solution do? Point me to its entry point.” Press **Enter** or click **Send**. Use **Shift+Enter** for a new line. Select message text and press **Ctrl+C** to copy it.
+5. Ask a follow-up directly in the same window. **Cancel** interrupts a running turn. After **Codex turn interrupted** appears, you can send again. **New Conversation** starts a fresh thread. Changing solutions also clears the current conversation.
 
-The detected development machine has Visual Studio 2022 Community 17.14.7 and Visual Studio 2026 Community 18.10.3, .NET SDKs 9.0.301 and 10.0.401, Git 2.50.1, Node 22.18.0/npm 11.11.0, and Codex CLI 0.169.0. Neither installed Visual Studio instance currently reports the **Visual Studio extension development** workload or the Visual Studio SDK component.
+## Approval policy
 
-In Visual Studio Installer, modify the **Visual Studio 2026 Community** instance and select **Visual Studio extension development** (`Microsoft.VisualStudio.Workload.VisualStudioExtension`). Its required components include the Visual Studio SDK (`Microsoft.VisualStudio.Component.VSSDK`), MSBuild, NuGet, the C# compiler/language services, and .NET Framework 4.8 SDK support. No additional workload is required for this M0 scaffold.
+The selector applies to the solution-bound Codex thread. Both options use a read-only sandbox, disable sandbox network access for turns, and decline elevation and file-change approval requests. The policy is saved in the Visual Studio profile. Change it between turns. Your next message starts a fresh conversation with the selected policy.
 
-## Build and run
+| Setting | What happens on CLI 0.169.0 |
+| --- | --- |
+| **never** (default) | Codex can run sandbox-permitted commands without asking for approval. Use this for normal repository inspection. A command that needs elevation cannot proceed. |
+| **untrusted** | Codex can run commands the CLI classifies as trusted. Other commands can require approval, which M1 declines. Even a repository read can therefore be blocked. |
 
-1. Open `CodexForVS.sln` in **Visual Studio 2026 Community 18.10.3**. Do not use the VS 2022 instance for this primary validation.
-2. Restore NuGet packages and build the solution.
-3. Set **CodexForVS.Extension** as the startup project and press `F5`. VSSDK starts the experimental instance belonging to the Visual Studio instance that is running the solution; therefore F5 from VS 2026 starts VS 2026 Experimental Instance, while F5 from VS 2022 starts VS 2022 Experimental Instance.
-4. In the experimental instance, select **View > Other Windows > Codex Chat**. It shows the intentional M0 disconnected placeholder.
+Tool activity appears above the transcript. The solution directory sets the working directory. Read-only sandboxing permits command execution and does not guarantee complete filesystem isolation or confidentiality. Codex sends the conversation and relevant project content to OpenAI to produce answers. M1 has no implementation workflow, worktrees, diff review, or change application.
 
-In VS 2026, **Extensions > Extension Development > Start Experimental Instance** and **Reset Experimental Instance** provide an explicit way to start or reset that same VS 2026 experimental profile. Use F5 to deploy the current Debug VSIX and attach the debugger.
+## Authentication and billing
 
-From a Developer PowerShell, the equivalent validation commands are:
+The extension uses JSON-RPC over local stdio to the official Codex CLI. Browser sign-in and credential storage belong to the CLI. The extension selects the built-in OpenAI model provider, omits `OPENAI_API_KEY` and `CODEX_API_KEY` from the child process environment, and checks for a ChatGPT account before each model turn. An API-key login cannot start a chat turn. There is no direct model API client, API-key entry, purchase action, or separately billed extension backend. [Official Codex authentication](https://developers.openai.com/codex/auth/)
+
+**ChatGPT sign-in alone does not guarantee zero additional charges.** On eligible personal plans, Codex uses the included allowance first. Once exhausted, it can spend an existing credit balance. Automatic reload can purchase more credits. These are account settings. In **ChatGPT → Settings → Usage**, check your remaining allowance, existing credits, and automatic reload. To stay within the subscription, keep automatic reload off and wait for the allowance to reset when exhausted. Managed workspaces may have their own budgets. CLI 0.169.0 exposes no included-allowance-only switch on a thread or turn. [Codex plan usage](https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan) · [Credit use and automatic reload](https://help.openai.com/en/articles/12642688-using-credits-for-flexible-usage-in-chatgpt-personal-plans)
+
+## Build and test
+
+On Windows, install the **Visual Studio extension development** workload in the VS 2026 instance, including the Visual Studio SDK and .NET Framework 4.8 targeting pack. Use the .NET 9 SDK selected by `global.json` (9.0.301 or compatible 9.x feature band). From the repository root run
 
 ```powershell
 dotnet restore CodexForVS.sln
-dotnet test CodexForVS.sln --no-restore
-msbuild CodexForVS.sln /restore /p:Configuration=Debug
+dotnet build CodexForVS.sln --no-restore -v minimal
+dotnet test CodexForVS.sln --no-restore -v minimal --blame-hang-timeout 30s
 ```
 
-Use Visual Studio’s F5 flow for deployment and debugging; M0 does not install a VSIX into the normal Visual Studio profile.
+The Debug installer is `src\CodexForVS.Extension\bin\Debug\net48\CodexForVS.Extension.vsix`. The manifest also targets x64 VS 2022. This release's live acceptance was performed on VS 2026.
 
-## Architecture
+- **Extension** hosts the in-process VSSDK/WPF tool window and reports the active solution directory.
+- **Client** manages the Codex process, JSONL transport, authentication, threads, turns, and chat ViewModel.
+- **Core** defines shared conversation and policy types without a Visual Studio dependency.
+- **Tests** exercise Client and Core with fakes. The unit suite runs without a live Codex login.
 
-```
-CodexForVS.Extension (net48, VSIX/WPF) --> CodexForVS.Client (netstandard2.0)
-                                              --> CodexForVS.Core (netstandard2.0)
-CodexForVS.Tests (net9.0) ------------------> Client/Core
-```
+## Quick acceptance check
 
-- **Extension** contains only Visual Studio integration, a `ToolWindowPane`, and a small WPF/MVVM placeholder.
-- **Client** is the future narrow boundary around the official, version-specific App Server protocol. It is deliberately empty in M0.
-- **Core** will contain session, worktree, review, conflict, and safe-apply domain services with no Visual Studio dependency.
-- **Tests** are independent of Visual Studio and will grow with Core and Client behavior.
+In a disposable solution, ask Codex to remember a made-up nickname. In a second message, ask for the nickname without repeating it. Then ask for a long answer, click **Cancel** while it is running, wait for the interruption status, and send “Reply with RESUMED.” All three replies and the interruption should be visible in the same Visual Studio session.
 
-The classic VSSDK/WPF tool window targets .NET Framework 4.8 and is compiled against the VS 2022 17.14 VSSDK. This is deliberate: traditional in-process VSSDK extensions require .NET Framework and are the established model for a native WPF `ToolWindowPane`. The manifest's `[17.0,)` installation target supports VS 2022 and VS 2026; VS 2026 evaluates the lower bound and retains 17.x API compatibility. This is verified compatibility, not a separate VS 2026 payload.
-
-The installed VS 2026 is 18.10.3. Microsoft documents the first VSSDK specifically targeting VS 2026 for 18.12 and later, so an 18.x SDK payload cannot be claimed or tested on this machine yet. We will retain the 17.14 SDK until a concrete API requirement or a supported 18.12+ development environment justifies multi-targeting. The in-process model requires careful UI-thread usage and can affect IDE stability; those are known tradeoffs, not reasons to migrate before a requirement demands it.
-
-## Planned security and isolation model
-
-M2 will create each implementation session in an owned Git worktree outside the source repository at a recorded base commit. The active checkout will not be an execution target. M3 will enumerate tracked and untracked changes and require whole-file review plus explicit approval before a conflict-aware, transactional application attempt. No automatic staging, commits, pushes, cleanups, credential collection, or approval bypass is planned.
-
-Git worktrees are not security boundaries. Before implementation support is added, the extension will document and constrain external-path access, network use, destructive commands, unsaved editor buffers, and the App Server approval flow.
-
-## Current limitations
-
-- The tool window is a disconnected visual placeholder only.
-- There is no Codex authentication, chat, model selector, streaming, cancellation, command approval, worktree creation, diff discovery, or accept/discard action.
-- The App Server protocol must be generated/verified against the installed CLI version when M1 begins (`codex app-server generate-json-schema`), rather than copied from this scaffold.
+If **Connect** fails, check `codex --version` in a fresh PowerShell and restart Visual Studio after installing the CLI or changing PATH. If sign-in is required, use **Sign In** with your eligible ChatGPT account. If **Send** is disabled, check that a saved solution is open and that the previous turn has finished. If a read is declined under **untrusted**, select **never** between turns and repeat the question in the new thread.

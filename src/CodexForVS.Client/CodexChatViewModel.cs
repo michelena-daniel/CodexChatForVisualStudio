@@ -20,18 +20,22 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
     private string workspacePath = string.Empty;
     private string statusMessage = "Disconnected.";
     private string? errorMessage;
+    private string activity = string.Empty;
     private ChatConnectionState connectionState = ChatConnectionState.Disconnected;
     private CodexAuthenticationInfo authentication;
     private CodexConversation? conversation;
     private ChatMessage? streamingAssistantMessage;
     private bool disposed;
+    private bool startingConversation;
+    private string approvalPolicy;
 
-    public CodexChatViewModel(ICodexAppServerClient client, IWorkspaceContext workspaceContext, IUiDispatcher dispatcher)
+    public CodexChatViewModel(ICodexAppServerClient client, IWorkspaceContext workspaceContext, IUiDispatcher dispatcher, string initialPolicy = ReadOnlyApprovalPolicy.Never)
     {
         this.client = client ?? throw new ArgumentNullException(nameof(client));
         this.workspaceContext = workspaceContext ?? throw new ArgumentNullException(nameof(workspaceContext));
         this.dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         authentication = client.Authentication;
+        approvalPolicy = ReadOnlyApprovalPolicy.Validate(initialPolicy);
         Messages = new ObservableCollection<ChatMessage>();
         ConnectCommand = new AsyncCommand(ConnectAsync, () => ConnectionState != ChatConnectionState.Connecting && !disposed);
         SignInCommand = new AsyncCommand(SignInAsync, () => Authentication.State == CodexAuthenticationState.AuthenticationRequired && !disposed);
@@ -46,6 +50,22 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
     }
 
     public ObservableCollection<ChatMessage> Messages { get; }
+    public string[] ApprovalPolicies { get; } = { ReadOnlyApprovalPolicy.Never, ReadOnlyApprovalPolicy.Untrusted };
+    public bool CanChangePolicy => !startingConversation && !IsTurnActive && ConnectionState != ChatConnectionState.Running;
+    public string ApprovalPolicy
+    {
+        get => approvalPolicy;
+        set
+        {
+            if (value == approvalPolicy || !CanChangePolicy) return;
+            approvalPolicy = ReadOnlyApprovalPolicy.Validate(value);
+            CurrentConversation = null;
+            streamingAssistantMessage = null;
+            Activity = string.Empty;
+            StatusMessage = "Policy changed. Your next message starts a new conversation.";
+            OnPropertyChanged();
+        }
+    }
     public AsyncCommand ConnectCommand { get; }
     public AsyncCommand SignInCommand { get; }
     public AsyncCommand SendMessageCommand { get; }
@@ -58,6 +78,7 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
     public string WorkspacePath { get => workspacePath; private set { if (workspacePath == value) return; workspacePath = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkspaceName)); } }
     public string WorkspaceName => string.IsNullOrWhiteSpace(WorkspacePath) ? "No solution open" : Path.GetFileName(WorkspacePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
     public string StatusMessage { get => statusMessage; private set { if (statusMessage == value) return; statusMessage = value; OnPropertyChanged(); } }
+    public string Activity { get => activity; private set { if (activity == value) return; activity = value; OnPropertyChanged(); } }
     public string? ErrorMessage { get => errorMessage; private set { if (errorMessage == value) return; errorMessage = value; OnPropertyChanged(); } }
     public ChatConnectionState ConnectionState { get => connectionState; private set { if (connectionState == value) return; connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsTurnActive)); RefreshCommands(); } }
     public CodexAuthenticationInfo Authentication { get => authentication; private set { authentication = value; OnPropertyChanged(); OnPropertyChanged(nameof(AuthenticationStatus)); RefreshCommands(); } }
@@ -65,7 +86,7 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
     public CodexConversation? CurrentConversation { get => conversation; private set { conversation = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsTurnActive)); RefreshCommands(); } }
     public bool IsTurnActive => CurrentConversation != null && (CurrentConversation.State == ConversationTurnState.Starting || CurrentConversation.State == ConversationTurnState.Running || CurrentConversation.State == ConversationTurnState.Cancelling);
     private bool HasWorkspace => !string.IsNullOrWhiteSpace(WorkspacePath) && Directory.Exists(WorkspacePath);
-    private bool CanStartConversation => ConnectionState == ChatConnectionState.Ready && Authentication.State == CodexAuthenticationState.Authenticated && HasWorkspace && !IsTurnActive;
+    private bool CanStartConversation => ConnectionState == ChatConnectionState.Ready && Authentication.State == CodexAuthenticationState.Authenticated && HasWorkspace && CanChangePolicy;
     private bool CanSend => CanStartConversation && !string.IsNullOrWhiteSpace(InputText);
 
     public async Task ConnectAsync()
@@ -80,9 +101,9 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
             await dispatcher.InvokeAsync(ApplyConnectionState).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (lifetimeCancellation.IsCancellationRequested) { }
-        catch
+        catch (Exception error)
         {
-            await dispatcher.InvokeAsync(() => { ConnectionState = ChatConnectionState.Error; ErrorMessage = "Could not connect to Codex App Server. Check that the Codex CLI is installed and signed in."; StatusMessage = "Connection failed."; }).ConfigureAwait(false);
+            await dispatcher.InvokeAsync(() => { ConnectionState = ChatConnectionState.Error; ErrorMessage = error is CodexLaunchException ? error.Message : "Could not initialize Codex App Server or read its account state (" + error.GetType().Name + ")."; StatusMessage = "Connection failed."; }).ConfigureAwait(false);
         }
     }
 
@@ -101,40 +122,62 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
     public async Task NewConversationAsync()
     {
         if (!CanStartConversation) return;
+        startingConversation = true;
+        RefreshCommands();
         ErrorMessage = null;
         try
         {
-            CodexConversation newConversation = await client.StartConversationAsync(WorkspacePath, lifetimeCancellation.Token).ConfigureAwait(false);
-            await dispatcher.InvokeAsync(() => { CurrentConversation = newConversation; streamingAssistantMessage = null; Messages.Clear(); StatusMessage = "New read-only conversation started."; }).ConfigureAwait(false);
+            CodexConversation newConversation = await client.StartConversationAsync(WorkspacePath, lifetimeCancellation.Token, ApprovalPolicy).ConfigureAwait(false);
+            await dispatcher.InvokeAsync(() => { CurrentConversation = newConversation; streamingAssistantMessage = null; Messages.Clear(); Activity = string.Empty; StatusMessage = "New read-only conversation started."; }).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (lifetimeCancellation.IsCancellationRequested) { }
         catch { await dispatcher.InvokeAsync(() => { ErrorMessage = "Could not start a Codex conversation for this solution."; StatusMessage = "Conversation failed to start."; }).ConfigureAwait(false); }
+        finally { await dispatcher.InvokeAsync(() => { startingConversation = false; RefreshCommands(); }).ConfigureAwait(false); }
     }
 
     public async Task SendMessageAsync()
     {
         if (!CanSend) return;
-        if (CurrentConversation == null) await NewConversationAsync().ConfigureAwait(false);
-        if (CurrentConversation == null) return;
         string message = InputText;
-        InputText = string.Empty;
-        Messages.Add(new ChatMessage("user", message));
-        streamingAssistantMessage = new ChatMessage("assistant", string.Empty);
-        Messages.Add(streamingAssistantMessage);
-        ErrorMessage = null;
         try
         {
+            if (CurrentConversation == null) await NewConversationAsync();
+            if (disposed || CurrentConversation == null) return;
+            await dispatcher.InvokeAsync(() =>
+            {
+                if (InputText == message) InputText = string.Empty;
+                Messages.Add(new ChatMessage("user", message));
+                Activity = string.Empty;
+                streamingAssistantMessage = null;
+                ErrorMessage = null;
+            });
             await client.SendAsync(message, lifetimeCancellation.Token).ConfigureAwait(false);
-            await dispatcher.InvokeAsync(() => { ConnectionState = ChatConnectionState.Running; StatusMessage = "Codex is responding…"; }).ConfigureAwait(false);
+            await dispatcher.InvokeAsync(() =>
+            {
+                if (CurrentConversation?.State != ConversationTurnState.Running) return;
+                ConnectionState = ChatConnectionState.Running;
+                StatusMessage = "Codex is responding…";
+            }).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (lifetimeCancellation.IsCancellationRequested) { }
+        catch (InvalidOperationException) when (client.Authentication.State == CodexAuthenticationState.AuthenticationRequired)
+        {
+            await dispatcher.InvokeAsync(ApplyConnectionState).ConfigureAwait(false);
+        }
         catch { await dispatcher.InvokeAsync(() => { ConnectionState = ChatConnectionState.Error; ErrorMessage = "Could not send the message to Codex."; StatusMessage = "Message failed."; }).ConfigureAwait(false); }
     }
 
     public async Task CancelTurnAsync()
     {
         if (!IsTurnActive) return;
-        try { await client.CancelAsync(lifetimeCancellation.Token).ConfigureAwait(false); await dispatcher.InvokeAsync(() => StatusMessage = "Cancelling Codex turn…").ConfigureAwait(false); }
+        try
+        {
+            await client.CancelAsync(lifetimeCancellation.Token).ConfigureAwait(false);
+            await dispatcher.InvokeAsync(() =>
+            {
+                if (CurrentConversation?.State == ConversationTurnState.Cancelling) StatusMessage = "Cancelling Codex turn…";
+            }).ConfigureAwait(false);
+        }
         catch (OperationCanceledException) when (lifetimeCancellation.IsCancellationRequested) { }
         catch { await dispatcher.InvokeAsync(() => { ErrorMessage = "Could not cancel the active Codex turn."; }).ConfigureAwait(false); }
     }
@@ -163,7 +206,8 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
                 streamingAssistantMessage.Content += value.Text ?? string.Empty;
                 break;
             case CodexConversationEventKind.ToolActivity:
-                Messages.Add(new ChatMessage("tool", value.Text ?? "Codex tool activity"));
+                streamingAssistantMessage = null;
+                Activity = value.Text ?? string.Empty;
                 break;
             case CodexConversationEventKind.TurnCompleted:
                 ConnectionState = ChatConnectionState.Ready; StatusMessage = "Codex turn completed."; streamingAssistantMessage = null; break;
@@ -185,6 +229,7 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
         string normalized = string.IsNullOrWhiteSpace(newWorkspacePath) ? string.Empty : Path.GetFullPath(newWorkspacePath);
         if (string.Equals(WorkspacePath, normalized, StringComparison.OrdinalIgnoreCase)) return;
         WorkspacePath = normalized;
+        Activity = string.Empty;
         CurrentConversation = null;
         streamingAssistantMessage = null;
         Messages.Clear();
@@ -201,7 +246,7 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
         else { ConnectionState = ChatConnectionState.AuthenticationRequired; StatusMessage = "Sign in with your ChatGPT subscription to continue."; }
     }
     private void Dispatch(Action action) { if (disposed) return; _ = dispatcher.InvokeAsync(() => { if (!disposed) action(); }); }
-    private void RefreshCommands() { ConnectCommand.RaiseCanExecuteChanged(); SignInCommand.RaiseCanExecuteChanged(); SendMessageCommand.RaiseCanExecuteChanged(); CancelTurnCommand.RaiseCanExecuteChanged(); NewConversationCommand.RaiseCanExecuteChanged(); }
+    private void RefreshCommands() { OnPropertyChanged(nameof(CanChangePolicy)); ConnectCommand.RaiseCanExecuteChanged(); SignInCommand.RaiseCanExecuteChanged(); SendMessageCommand.RaiseCanExecuteChanged(); CancelTurnCommand.RaiseCanExecuteChanged(); NewConversationCommand.RaiseCanExecuteChanged(); }
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 
     public void Dispose()

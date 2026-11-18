@@ -21,9 +21,18 @@ public sealed class CodexLoginRequest
 
 public enum ConversationTurnState { Idle, Starting, Running, Cancelling, Completed, Failed, Interrupted }
 
+public static class ReadOnlyApprovalPolicy
+{
+    public const string Never = "never";
+    public const string Untrusted = "untrusted";
+    public static string Validate(string value) => value == Never || value == Untrusted
+        ? value : throw new ArgumentOutOfRangeException(nameof(value));
+}
+
 public sealed class CodexConversation
 {
-    public CodexConversation(string threadId, string workspaceDirectory) { ThreadId = threadId ?? throw new ArgumentNullException(nameof(threadId)); WorkspaceDirectory = workspaceDirectory ?? throw new ArgumentNullException(nameof(workspaceDirectory)); State = ConversationTurnState.Idle; }
+    public CodexConversation(string threadId, string workspaceDirectory, string approvalPolicy = ReadOnlyApprovalPolicy.Never) { ThreadId = threadId ?? throw new ArgumentNullException(nameof(threadId)); WorkspaceDirectory = workspaceDirectory ?? throw new ArgumentNullException(nameof(workspaceDirectory)); ApprovalPolicy = ReadOnlyApprovalPolicy.Validate(approvalPolicy); State = ConversationTurnState.Idle; }
+    public string ApprovalPolicy { get; }
     public string ThreadId { get; }
     public string WorkspaceDirectory { get; }
     public string? ActiveTurnId { get; internal set; }

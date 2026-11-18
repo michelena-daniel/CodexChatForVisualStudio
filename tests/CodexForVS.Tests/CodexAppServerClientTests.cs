@@ -13,25 +13,33 @@ namespace CodexForVS.Tests;
 
 public sealed class CodexAppServerClientTests
 {
-    [Fact]
-    public async Task HandshakeAndReadOnlyThreadUseTransport()
+    [Theory]
+    [InlineData(null, "never")]
+    [InlineData("untrusted", "untrusted")]
+    public async Task HandshakeAndReadOnlyThreadUseTransport(string? selection, string expected)
     {
         FakeTransport transport = new FakeTransport();
         using (CodexAppServerClient client = new CodexAppServerClient(transport))
         {
             await client.StartAsync(CancellationToken.None);
-            CodexConversation conversation = await client.StartConversationAsync(Workspace, CancellationToken.None);
+            CodexConversation conversation = selection == null
+                ? await client.StartConversationAsync(Workspace, CancellationToken.None)
+                : await client.StartConversationAsync(Workspace, CancellationToken.None, selection);
             await client.SendAsync("hi", CancellationToken.None);
 
             Assert.Equal("initialize", transport.Requests[0].Method);
             Assert.Equal("account/read", transport.Requests[1].Method);
             Assert.Equal("thread/start", transport.Requests[2].Method);
+            Assert.Equal("openai", (string?)transport.Requests[2].Parameters["modelProvider"]);
             Assert.Equal(Workspace, (string?)transport.Requests[2].Parameters["cwd"]);
             Assert.Equal("read-only", (string?)transport.Requests[2].Parameters["sandbox"]);
-            Assert.Equal("untrusted", (string?)transport.Requests[2].Parameters["approvalPolicy"]);
-            Assert.Equal("turn/start", transport.Requests[3].Method);
-            Assert.Equal(Workspace, (string?)transport.Requests[3].Parameters["cwd"]);
-            Assert.Equal("readOnly", (string?)transport.Requests[3].Parameters.SelectToken("sandboxPolicy.type"));
+            Assert.Equal(expected, (string?)transport.Requests[2].Parameters["approvalPolicy"]);
+            Assert.Equal("account/read", transport.Requests[3].Method);
+            Request turn = Assert.Single(transport.Requests, request => request.Method == "turn/start");
+            Assert.Equal(expected, (string?)turn.Parameters["approvalPolicy"]);
+            Assert.False((bool)turn.Parameters.SelectToken("sandboxPolicy.networkAccess")!);
+            Assert.Equal(Workspace, (string?)turn.Parameters["cwd"]);
+            Assert.Equal("readOnly", (string?)turn.Parameters.SelectToken("sandboxPolicy.type"));
             Assert.Equal("initialized", transport.Notifications[0]);
             Assert.Equal("thread-1", conversation.ThreadId);
         }
@@ -52,8 +60,25 @@ public sealed class CodexAppServerClientTests
             Assert.Equal("chatgpt", (string?)transport.Requests.Single(request => request.Method == "account/login/start").Parameters["type"]);
 
             transport.Emit(Notification("account/login/completed", new JObject { ["success"] = true, ["loginId"] = "login-1" }));
+            Assert.Equal(CodexAuthenticationState.SigningIn, client.Authentication.State);
+            transport.Emit(Notification("account/updated", new JObject { ["authMode"] = "chatgpt", ["planType"] = "plus" }));
             Assert.Equal(CodexAuthenticationState.Authenticated, client.Authentication.State);
         }
+    }
+
+    [Fact]
+    public async Task ExistingConversationRefusesNextTurnWhenLoginSwitchesToApiKey()
+    {
+        FakeTransport transport = new FakeTransport();
+        using CodexAppServerClient client = new CodexAppServerClient(transport);
+        await client.StartAsync(CancellationToken.None);
+        await client.StartConversationAsync(Workspace, CancellationToken.None);
+        transport.AccountResponse = new JObject { ["account"] = new JObject { ["type"] = "apiKey" } };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.SendAsync("hello", CancellationToken.None));
+
+        Assert.Equal(CodexAuthenticationState.AuthenticationRequired, client.Authentication.State);
+        Assert.DoesNotContain(transport.Requests, request => request.Method == "turn/start");
     }
 
     [Fact]
@@ -146,6 +171,42 @@ public sealed class CodexAppServerClientTests
     }
 
     [Fact]
+    public async Task ImmediateCancelWaitsForServerToInstallActiveTurn()
+    {
+        FakeTransport transport = new FakeTransport { DeferTurnStarted = true };
+        using CodexAppServerClient client = new CodexAppServerClient(transport);
+        await client.StartAsync(CancellationToken.None);
+        CodexConversation conversation = await client.StartConversationAsync(Workspace, CancellationToken.None);
+        Task sending = client.SendAsync("hello", CancellationToken.None);
+        Task cancelling = client.CancelAsync(CancellationToken.None);
+        Assert.Equal(ConversationTurnState.Starting, conversation.State);
+        Assert.DoesNotContain(transport.Requests, request => request.Method == "turn/interrupt");
+
+        transport.Emit(TurnStarted(conversation.ThreadId, "turn-1"));
+        await Task.WhenAll(sending, cancelling).WaitAsync(TimeSpan.FromSeconds(3));
+        Request interrupt = Assert.Single(transport.Requests, request => request.Method == "turn/interrupt");
+        Assert.Equal("turn-1", (string?)interrupt.Parameters["turnId"]);
+        transport.Emit(TurnCompleted(conversation.ThreadId, "turn-1", "interrupted"));
+        Assert.Equal(ConversationTurnState.Interrupted, conversation.State);
+    }
+
+    [Fact]
+    public async Task DisconnectAfterAcknowledgementReleasesSendAndQueuedCancel()
+    {
+        FakeTransport transport = new FakeTransport { DeferTurnStarted = true };
+        using CodexAppServerClient client = new CodexAppServerClient(transport);
+        await client.StartAsync(CancellationToken.None);
+        CodexConversation conversation = await client.StartConversationAsync(Workspace, CancellationToken.None);
+        Task sending = client.SendAsync("hello", CancellationToken.None);
+        Task cancelling = client.CancelAsync(CancellationToken.None);
+        transport.RaiseFault(new EndOfStreamException());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => sending.WaitAsync(TimeSpan.FromSeconds(3)));
+        await cancelling.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(ConversationTurnState.Failed, conversation.State);
+        Assert.DoesNotContain(transport.Requests, request => request.Method == "turn/interrupt");
+    }
+
+    [Fact]
     public async Task NewConversationReplacesSelectionAndTransportFaultFailsOnlyActiveTurn()
     {
         FakeTransport transport = new FakeTransport();
@@ -175,6 +236,14 @@ public sealed class CodexAppServerClientTests
             await client.StartAsync(CancellationToken.None);
             CodexConversation conversation = await client.StartConversationAsync(Workspace, CancellationToken.None);
             await client.SendAsync("analyze", CancellationToken.None);
+            foreach (string itemType in new[] { "userMessage", "agentMessage" })
+            {
+                foreach (string method in new[] { "item/started", "item/completed" })
+                {
+                    transport.Emit(Notification(method, new JObject { ["threadId"] = conversation.ThreadId, ["turnId"] = "turn-1", ["item"] = new JObject { ["type"] = itemType } }));
+                }
+            }
+            Assert.DoesNotContain(CodexConversationEventKind.ToolActivity, events);
             transport.Emit(Notification("item/started", new JObject { ["threadId"] = conversation.ThreadId, ["turnId"] = "turn-1", ["startedAtMs"] = 1, ["item"] = new JObject { ["type"] = "commandExecution" } }));
             transport.Emit(Notification("turn/completed", new JObject { ["threadId"] = conversation.ThreadId, ["turn"] = new JObject { ["id"] = "turn-1", ["status"] = "failed", ["error"] = new JObject { ["message"] = "read-only denial" } } }));
             Assert.Contains(CodexConversationEventKind.ToolActivity, events);
@@ -200,6 +269,7 @@ public sealed class CodexAppServerClientTests
 
     private static string Workspace => Path.GetFullPath(Directory.GetCurrentDirectory());
     private static JObject Notification(string method, JObject parameters) => new JObject { ["method"] = method, ["params"] = parameters };
+    private static JObject TurnStarted(string threadId, string turnId) => Notification("turn/started", new JObject { ["threadId"] = threadId, ["turn"] = new JObject { ["id"] = turnId, ["status"] = "inProgress" } });
     private static JObject TurnCompleted(string threadId, string turnId, string status) => Notification("turn/completed", new JObject { ["threadId"] = threadId, ["turn"] = new JObject { ["id"] = turnId, ["status"] = status } });
     private static JObject UnauthenticatedAccount() => new JObject { ["requiresOpenaiAuth"] = true, ["account"] = JValue.CreateNull() };
 
@@ -212,8 +282,9 @@ public sealed class CodexAppServerClientTests
         public JObject? Response;
         public JToken? ResponseId;
         public bool CancelLoginRequest { get; set; }
+        public bool DeferTurnStarted { get; set; }
         public TaskCompletionSource<bool> ResponseReceived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        public JObject AccountResponse { get; set; } = new JObject { ["requiresOpenaiAuth"] = false, ["account"] = new JObject { ["type"] = "chatgpt", ["planType"] = "plus" } };
+        public JObject AccountResponse { get; set; } = new JObject { ["requiresOpenaiAuth"] = true, ["account"] = new JObject { ["type"] = "chatgpt", ["planType"] = "plus" } };
         public event EventHandler<JObject>? MessageReceived;
         public event EventHandler<Exception>? Faulted;
 
@@ -223,7 +294,12 @@ public sealed class CodexAppServerClientTests
             if (method == "account/read") return Task.FromResult(AccountResponse);
             if (method == "account/login/start") return CancelLoginRequest ? Task.FromCanceled<JObject>(new CancellationToken(true)) : Task.FromResult(new JObject { ["type"] = "chatgpt", ["loginId"] = "login-1", ["authUrl"] = "https://example.test/login" });
             if (method == "thread/start") return Task.FromResult(new JObject { ["thread"] = new JObject { ["id"] = "thread-" + ++nextThread } });
-            if (method == "turn/start") return Task.FromResult(new JObject { ["turn"] = new JObject { ["id"] = "turn-" + ++nextTurn } });
+            if (method == "turn/start")
+            {
+                string turnId = "turn-" + ++nextTurn;
+                if (!DeferTurnStarted) Emit(TurnStarted((string)parameters["threadId"]!, turnId));
+                return Task.FromResult(new JObject { ["turn"] = new JObject { ["id"] = turnId } });
+            }
             return Task.FromResult(new JObject());
         }
         public Task NotifyAsync(string method, JObject parameters, CancellationToken cancellationToken) { Notifications.Add(method); return Task.CompletedTask; }

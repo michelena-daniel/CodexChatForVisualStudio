@@ -23,6 +23,26 @@ public sealed class CodexChatViewModelTests
     }
 
     [Fact]
+    public async Task PolicyChangesBetweenTurnsStartAFreshThread()
+    {
+        var client = new FakeClient(CodexAuthenticationState.Authenticated);
+        using var model = Create(new FakeWorkspaceContext(Workspace), client);
+        await model.ConnectAsync();
+        model.InputText = "one";
+        await model.SendMessageAsync();
+        model.ApprovalPolicy = "untrusted";
+        Assert.Equal("never", model.ApprovalPolicy);
+        string firstThread = model.CurrentConversation!.ThreadId;
+        client.CompleteCurrentTurn("completed");
+        model.ApprovalPolicy = "untrusted";
+        Assert.Null(model.CurrentConversation);
+        model.InputText = "two";
+        await model.SendMessageAsync();
+        Assert.Equal("untrusted", model.CurrentConversation!.ApprovalPolicy);
+        Assert.NotEqual(firstThread, model.CurrentConversation.ThreadId);
+    }
+
+    [Fact]
     public async Task ConnectReflectsAuthenticatedAndAuthenticationRequiredStates()
     {
         FakeWorkspaceContext workspace = new FakeWorkspaceContext(Workspace);
@@ -65,11 +85,41 @@ public sealed class CodexChatViewModelTests
             Assert.Equal(1, client.StartConversationCalls);
             Assert.Equal("Inspect this solution", client.SentMessages[0]);
             Assert.Equal("user", viewModel.Messages[0].Role);
+            client.EmitConversation(CodexConversationEventKind.ToolActivity, client.CurrentConversation!.ThreadId, "turn-1", "Workspace command blocked by policy.");
+            Assert.Equal("Workspace command blocked by policy.", viewModel.Activity);
+            Assert.Single(viewModel.Messages);
 
             client.EmitConversation(CodexConversationEventKind.AssistantDelta, client.CurrentConversation!.ThreadId, "turn-1", "Hello");
             client.EmitConversation(CodexConversationEventKind.AssistantDelta, client.CurrentConversation.ThreadId, "turn-1", " world");
             Assert.Equal("Hello world", viewModel.Messages[1].Content);
         }
+    }
+
+    [Fact]
+    public async Task FirstSendDispatchesDraftAndHistoryUpdatesAfterThreadStart()
+    {
+        var client = new FakeClient(CodexAuthenticationState.Authenticated);
+        var dispatcher = new ImmediateDispatcher();
+        using var viewModel = new CodexChatViewModel(client, new FakeWorkspaceContext(Workspace), dispatcher);
+        await viewModel.ConnectAsync();
+        viewModel.InputText = "OK";
+        var dispatched = new List<bool>();
+        viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(viewModel.InputText)) dispatched.Add(dispatcher.InCallback);
+        };
+        viewModel.Messages.CollectionChanged += (_, args) =>
+        {
+            if (args.NewItems != null) dispatched.Add(dispatcher.InCallback);
+        };
+        var gate = new TaskCompletionSource<CodexConversation>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.ThreadStart = gate.Task;
+        Task send = viewModel.SendMessageCommand.ExecuteAsync();
+        Assert.Empty(client.SentMessages);
+        gate.SetResult(client.CurrentConversation!);
+        await send.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(new[] { true, true }, dispatched);
+        Assert.Equal("OK", Assert.Single(client.SentMessages));
     }
 
     [Fact]
@@ -131,7 +181,17 @@ public sealed class CodexChatViewModelTests
     private static CodexChatViewModel Create(FakeWorkspaceContext workspace, FakeClient client) => new CodexChatViewModel(client, workspace, new ImmediateDispatcher());
     private static string Workspace => Path.GetFullPath(Directory.GetCurrentDirectory());
 
-    private sealed class ImmediateDispatcher : IUiDispatcher { public Task InvokeAsync(Action action) { action(); return Task.CompletedTask; } }
+    private sealed class ImmediateDispatcher : IUiDispatcher
+    {
+        public bool InCallback { get; private set; }
+        public Task InvokeAsync(Action action)
+        {
+            InCallback = true;
+            try { action(); }
+            finally { InCallback = false; }
+            return Task.CompletedTask;
+        }
+    }
     private sealed class FakeWorkspaceContext : IWorkspaceContext
     {
         public FakeWorkspaceContext(string? workspacePath) { WorkspacePath = workspacePath; }
@@ -146,6 +206,7 @@ public sealed class CodexChatViewModelTests
         public CodexAuthenticationInfo Authentication { get; private set; }
         public CodexConversation? CurrentConversation { get; private set; }
         public int StartConversationCalls { get; private set; }
+        public Task<CodexConversation>? ThreadStart { get; set; }
         public int CancelCalls { get; private set; }
         public List<string> SentMessages { get; } = new List<string>();
         public event EventHandler<CodexEventArgs>? EventReceived;
@@ -153,11 +214,11 @@ public sealed class CodexChatViewModelTests
         public event EventHandler<CodexConversationEventArgs>? ConversationEventReceived;
         public Task StartAsync(CancellationToken cancellationToken) { AuthenticationChanged?.Invoke(this, Authentication); return Task.CompletedTask; }
         public Task<CodexLoginRequest> SignInAsync(CancellationToken cancellationToken) => Task.FromResult(new CodexLoginRequest("login", "https://example.test/login"));
-        public Task<CodexConversation> StartConversationAsync(string workspaceDirectory, CancellationToken cancellationToken)
+        public Task<CodexConversation> StartConversationAsync(string workspaceDirectory, CancellationToken cancellationToken, string approvalPolicy = ReadOnlyApprovalPolicy.Never)
         {
             StartConversationCalls++;
-            CurrentConversation = new CodexConversation("thread-" + StartConversationCalls, workspaceDirectory);
-            return Task.FromResult(CurrentConversation);
+            CurrentConversation = new CodexConversation("thread-" + StartConversationCalls, workspaceDirectory, approvalPolicy);
+            return ThreadStart ?? Task.FromResult(CurrentConversation);
         }
         public Task SendAsync(string text, CancellationToken cancellationToken)
         {
