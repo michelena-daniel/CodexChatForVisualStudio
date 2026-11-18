@@ -23,6 +23,7 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
     private string activity = string.Empty;
     private ChatConnectionState connectionState = ChatConnectionState.Disconnected;
     private CodexAuthenticationInfo authentication;
+    private CodexAuthenticationInfo? usageAccount;
     private CodexConversation? conversation;
     private ChatMessage? streamingAssistantMessage;
     private bool disposed;
@@ -37,6 +38,7 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
         authentication = client.Authentication;
         approvalPolicy = ReadOnlyApprovalPolicy.Validate(initialPolicy);
         Messages = new ObservableCollection<ChatMessage>();
+        Usage = new CodexUsageViewModel(client, dispatcher);
         ConnectCommand = new AsyncCommand(ConnectAsync, () => ConnectionState != ChatConnectionState.Connecting && !disposed);
         SignInCommand = new AsyncCommand(SignInAsync, () => Authentication.State == CodexAuthenticationState.AuthenticationRequired && !disposed);
         SendMessageCommand = new AsyncCommand(SendMessageAsync, () => CanSend);
@@ -44,12 +46,14 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
         NewConversationCommand = new AsyncCommand(NewConversationAsync, () => CanStartConversation);
         client.EventReceived += OnClientEventReceived;
         client.AuthenticationChanged += OnAuthenticationChanged;
+        client.UsageUpdated += OnUsageUpdated;
         client.ConversationEventReceived += OnConversationEventReceived;
         workspaceContext.WorkspaceChanged += OnWorkspaceChanged;
         UpdateWorkspace(workspaceContext.WorkspacePath);
     }
 
     public ObservableCollection<ChatMessage> Messages { get; }
+    public CodexUsageViewModel Usage { get; }
     public string[] ApprovalPolicies { get; } = { ReadOnlyApprovalPolicy.Never, ReadOnlyApprovalPolicy.Untrusted };
     public bool CanChangePolicy => !startingConversation && !IsTurnActive && ConnectionState != ChatConnectionState.Running;
     public string ApprovalPolicy
@@ -184,15 +188,25 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
 
     private void OnAuthenticationChanged(object? sender, CodexAuthenticationInfo value) => Dispatch(() =>
     {
+        UpdateUsageAccount(value);
         Authentication = value;
         if (value.State == CodexAuthenticationState.Authenticated) { ConnectionState = ChatConnectionState.Ready; StatusMessage = "Connected and authenticated."; }
         else if (value.State == CodexAuthenticationState.AuthenticationRequired) { ConnectionState = ChatConnectionState.AuthenticationRequired; StatusMessage = "Sign in with your ChatGPT subscription to continue."; }
         else if (value.State == CodexAuthenticationState.Failed) { ConnectionState = ChatConnectionState.Error; ErrorMessage = value.ErrorMessage ?? "Codex authentication failed."; }
     });
 
+    private void OnUsageUpdated(object? sender, CodexUsageSnapshot snapshot) => Dispatch(() => Usage.ApplyUpdate(snapshot));
+
+    private void UpdateUsageAccount(CodexAuthenticationInfo account)
+    {
+        if (ReferenceEquals(usageAccount, account)) return;
+        usageAccount = account;
+        Usage.SetSession(account.State == CodexAuthenticationState.Authenticated);
+    }
+
     private void OnClientEventReceived(object? sender, CodexEventArgs value) => Dispatch(() =>
     {
-        if (value.Kind == "error") { ConnectionState = ChatConnectionState.Error; ErrorMessage = value.Text; StatusMessage = "Disconnected from Codex."; }
+        if (value.Kind == "error") { usageAccount = null; Usage.SetSession(false); ConnectionState = ChatConnectionState.Error; ErrorMessage = value.Text; StatusMessage = "Disconnected from Codex."; }
         else if (value.Kind == "diagnostic") StatusMessage = value.Text;
     });
 
@@ -242,6 +256,7 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
     private void ApplyConnectionState()
     {
         Authentication = client.Authentication;
+        UpdateUsageAccount(Authentication);
         if (Authentication.State == CodexAuthenticationState.Authenticated) { ConnectionState = ChatConnectionState.Ready; StatusMessage = "Connected and authenticated."; }
         else { ConnectionState = ChatConnectionState.AuthenticationRequired; StatusMessage = "Sign in with your ChatGPT subscription to continue."; }
     }
@@ -254,6 +269,8 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
         if (disposed) return;
         disposed = true;
         lifetimeCancellation.Cancel();
+        client.UsageUpdated -= OnUsageUpdated;
+        Usage.SetSession(false);
         client.EventReceived -= OnClientEventReceived;
         client.AuthenticationChanged -= OnAuthenticationChanged;
         client.ConversationEventReceived -= OnConversationEventReceived;

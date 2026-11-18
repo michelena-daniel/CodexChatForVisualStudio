@@ -45,6 +45,15 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
     public CodexConversation? CurrentConversation { get { lock (lifecycleGate) return conversation; } }
     public event EventHandler<CodexEventArgs>? EventReceived;
     public event EventHandler<CodexAuthenticationInfo>? AuthenticationChanged;
+    public event EventHandler<CodexUsageSnapshot>? UsageUpdated;
+
+    public async Task<CodexUsageSnapshot> ReadUsageAsync(CancellationToken cancellationToken)
+    {
+        if (Authentication.State != CodexAuthenticationState.Authenticated) throw new InvalidOperationException("Sign in to read Codex usage.");
+        JObject result = await RequireTransport().RequestAsync("account/rateLimits/read",
+            new JObject { ["excludeResetCreditDetails"] = true }, cancellationToken).ConfigureAwait(false);
+        return CodexUsageSnapshot.Parse(result) ?? throw new InvalidDataException("Codex usage unavailable.");
+    }
     public event EventHandler<CodexConversationEventArgs>? ConversationEventReceived;
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -204,6 +213,9 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
             switch (method)
             {
                 case "account/updated": SetAuthentication(ParseUpdatedAuthentication(parameters)); break;
+                case "account/rateLimits/updated":
+                    if (CodexUsageSnapshot.Parse(parameters) is CodexUsageSnapshot usage) UsageUpdated?.Invoke(this, usage);
+                    break;
                 case "account/login/completed": HandleLoginCompleted(parameters); break;
                 case "turn/started": HandleTurnStarted(parameters); break;
                 case "item/agentMessage/delta": HandleAssistantDelta(parameters); break;

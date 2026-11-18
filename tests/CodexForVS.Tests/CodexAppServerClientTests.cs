@@ -254,6 +254,33 @@ public sealed class CodexAppServerClientTests
     }
 
     [Fact]
+    public async Task ReadsCodexUsageWithoutStartingThreadAndFiltersOtherBucketNotifications()
+    {
+        FakeTransport transport = new FakeTransport();
+        using CodexAppServerClient client = new CodexAppServerClient(transport);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.ReadUsageAsync(CancellationToken.None));
+        await client.StartAsync(CancellationToken.None);
+        CodexUsageSnapshot result = await client.ReadUsageAsync(CancellationToken.None);
+        Request read = Assert.Single(transport.Requests, request => request.Method == "account/rateLimits/read");
+        Assert.True((bool)read.Parameters["excludeResetCreditDetails"]!);
+        CodexUsageWindow window = Assert.Single(result.Windows);
+        Assert.Equal(81, window.PercentRemaining);
+        Assert.Equal("15m", window.Label);
+        Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1700000000), window.ResetsAt);
+        Assert.False(result.OrdinaryUsageAllowed);
+        Assert.Null(client.CurrentConversation);
+
+        List<CodexUsageSnapshot> updates = new List<CodexUsageSnapshot>();
+        client.UsageUpdated += (_, usage) => updates.Add(usage);
+        transport.Emit(Notification("account/rateLimits/updated", JObject.Parse("{rateLimits:{limitId:'other',primary:{usedPercent:50}}}")));
+        transport.Emit(Notification("account/rateLimits/updated", JObject.Parse("{rateLimits:{primary:{usedPercent:200},secondary:{usedPercent:5,resetsAt:9999999999999}}}")));
+        CodexUsageWindow secondary = Assert.Single(Assert.Single(updates).Windows);
+        Assert.Equal("Secondary", secondary.Label);
+        Assert.Null(secondary.ResetsAt);
+        Assert.Equal(95, secondary.PercentRemaining);
+    }
+
+    [Fact]
     public async Task DispatcherPreservesApprovalId()
     {
         FakeTransport transport = new FakeTransport();
@@ -291,6 +318,8 @@ public sealed class CodexAppServerClientTests
         public Task<JObject> RequestAsync(string method, JObject parameters, CancellationToken cancellationToken)
         {
             Requests.Add(new Request(method, parameters));
+            if (method == "account/rateLimits/read") return Task.FromResult(JObject.Parse(
+                "{ordinaryUsageAllowed:false,rateLimits:{limitId:'other'},rateLimitsByLimitId:{codex:{primary:{usedPercent:19,windowDurationMins:15,resetsAt:1700000000}}}}"));
             if (method == "account/read") return Task.FromResult(AccountResponse);
             if (method == "account/login/start") return CancelLoginRequest ? Task.FromCanceled<JObject>(new CancellationToken(true)) : Task.FromResult(new JObject { ["type"] = "chatgpt", ["loginId"] = "login-1", ["authUrl"] = "https://example.test/login" });
             if (method == "thread/start") return Task.FromResult(new JObject { ["thread"] = new JObject { ["id"] = "thread-" + ++nextThread } });

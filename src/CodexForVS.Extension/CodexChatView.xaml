@@ -71,7 +71,49 @@
     <DockPanel Grid.Row="4" LastChildFill="False">
       <Button DockPanel.Dock="Right" Margin="6,0,0,0" Padding="12,3" Command="{Binding CancelTurnCommand}" Content="Cancel" />
       <Button DockPanel.Dock="Right" Padding="12,3" Command="{Binding SendMessageCommand}" Content="Send" />
-      <TextBlock VerticalAlignment="Center" Text="Read-only mode: inspection only" />
     </DockPanel>
+    <StackPanel Grid.Row="5" Margin="0,4,0,0" DataContext="{Binding Usage}">
+      <WrapPanel>
+        <TextBlock VerticalAlignment="Center" Margin="0,0,8,0" Text="Read-only mode" />
+        <ToggleButton x:Name="UsageToggle" Padding="6,2" ToolTip="Show or hide Codex usage"
+                      AutomationProperties.Name="{Binding Summary}">
+          <WrapPanel>
+            <TextBlock Text="{Binding Summary}" />
+            <TextBlock Margin="4,0,0,0" Text="▾" />
+          </WrapPanel>
+        </ToggleButton>
+      </WrapPanel>
+      <Border Margin="0,4,0,0" Padding="8" BorderThickness="1"
+              BorderBrush="{DynamicResource {x:Static SystemColors.ControlDarkBrushKey}}">
+        <Border.Style>
+          <Style TargetType="Border">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+              <DataTrigger Binding="{Binding IsChecked, ElementName=UsageToggle}" Value="True">
+                <Setter Property="Visibility" Value="Visible" />
+              </DataTrigger>
+            </Style.Triggers>
+          </Style>
+        </Border.Style>
+        <StackPanel>
+          <TextBlock FontWeight="SemiBold" Text="Codex usage" />
+          <ItemsControl ItemsSource="{Binding Windows}" Focusable="False"
+                        Foreground="{DynamicResource {x:Static vs:EnvironmentColors.ToolWindowTextBrushKey}}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <WrapPanel Margin="0,4,0,0">
+                  <TextBlock Text="{Binding Description}" Margin="0,0,12,0" />
+                  <TextBlock Text="{Binding ResetText}" />
+                </WrapPanel>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+          <DockPanel Margin="0,6,0,0">
+            <Button Content="Refresh" DockPanel.Dock="Right" Padding="6,2" Command="{Binding RefreshCommand}" />
+            <TextBlock VerticalAlignment="Center" TextWrapping="Wrap" Text="{Binding Status}" />
+          </DockPanel>
+        </StackPanel>
+      </Border>
+    </StackPanel>
   </Grid>
 </UserControl>

@@ -5,12 +5,91 @@ using System.Threading;
 using System.Threading.Tasks;
 using CodexForVS.Client;
 using CodexForVS.Core;
+using Newtonsoft.Json.Linq;
 using Xunit;
 
 namespace CodexForVS.Tests;
 
 public sealed class CodexChatViewModelTests
 {
+    private static CodexUsageSnapshot UsageReading(int primaryUsed, int weeklyUsed) =>
+        CodexUsageSnapshot.Parse(new JObject { ["rateLimits"] = new JObject {
+            ["primary"] = new JObject { ["usedPercent"] = primaryUsed, ["windowDurationMins"] = 300 },
+            ["secondary"] = new JObject { ["usedPercent"] = weeklyUsed, ["windowDurationMins"] = 10080 }
+        } })!;
+
+    [Fact]
+    public async Task UsageShowsTightestWindowAndRetainsLastReadingWhenRefreshFails()
+    {
+        FakeClient client = new FakeClient(CodexAuthenticationState.Authenticated) { Reading = Task.FromResult(UsageReading(72, 26)) };
+        using CodexChatViewModel model = Create(new FakeWorkspaceContext(Workspace), client);
+        Assert.Equal("Usage unavailable", model.Usage.Summary);
+        await model.ConnectAsync();
+        Assert.Equal(1, client.UsageReads);
+        Assert.Equal("Usage · 5h · 28% left", model.Usage.Summary);
+        Assert.Equal(2, model.Usage.Windows.Count);
+        client.Push(UsageReading(30, 99));
+        Assert.Equal("Usage · Weekly · 1% left", model.Usage.Summary);
+        string updated = model.Usage.Status;
+        client.Reading = Task.FromException<CodexUsageSnapshot>(new IOException());
+        await model.Usage.RefreshCommand.ExecuteAsync();
+        Assert.Contains(updated, model.Usage.Status);
+        Assert.Contains("Refresh failed", model.Usage.Status);
+        Assert.Equal("Usage · Weekly · 1% left", model.Usage.Summary);
+        model.InputText = "hello";
+        Assert.True(model.SendMessageCommand.CanExecute(null!));
+        Assert.Null(model.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task NotificationsWinOverOlderReadsAndSignOutClearsUsage()
+    {
+        FakeClient client = new FakeClient(CodexAuthenticationState.AuthenticationRequired);
+        using CodexChatViewModel model = Create(new FakeWorkspaceContext(Workspace), client);
+        await model.ConnectAsync();
+        Assert.Equal(0, client.UsageReads);
+        Assert.False(model.Usage.RefreshCommand.CanExecute(null!));
+        client.Authenticate(CodexAuthenticationState.Authenticated);
+        Assert.Equal(1, client.UsageReads);
+        TaskCompletionSource<CodexUsageSnapshot> pending = new TaskCompletionSource<CodexUsageSnapshot>();
+        client.Reading = pending.Task;
+        Task refresh = model.Usage.RefreshCommand.ExecuteAsync();
+        client.Push(UsageReading(10, 90));
+        pending.SetResult(UsageReading(10, 2));
+        await refresh;
+        Assert.Equal("Usage · Weekly · 10% left", model.Usage.Summary);
+
+        pending = new TaskCompletionSource<CodexUsageSnapshot>();
+        client.Reading = pending.Task;
+        refresh = model.Usage.RefreshCommand.ExecuteAsync();
+        client.Authenticate(CodexAuthenticationState.AuthenticationRequired);
+        pending.SetResult(UsageReading(10, 2));
+        await refresh;
+        Assert.Equal("Usage unavailable", model.Usage.Summary);
+        Assert.Empty(model.Usage.Windows);
+    }
+
+    [Fact]
+    public async Task IncludedLimitWarningRequiresServerConfirmationAndLeavesSendAvailable()
+    {
+        FakeClient client = new FakeClient(CodexAuthenticationState.Authenticated);
+        using CodexChatViewModel model = Create(new FakeWorkspaceContext(Workspace), client);
+        await model.ConnectAsync();
+        client.Push(UsageReading(100, 50));
+        Assert.Contains("0% left", model.Usage.Summary);
+        client.Push(CodexUsageSnapshot.Parse(JObject.Parse("{rateLimits:{rateLimitReachedType:'rate_limit_reached'}}"))!);
+        Assert.Equal("Included usage limit reached", model.Usage.Summary);
+        client.Reading = Task.FromResult(CodexUsageSnapshot.Parse(JObject.Parse("{ordinaryUsageAllowed:false,rateLimits:{primary:{usedPercent:5}}}"))!);
+        await model.Usage.RefreshCommand.ExecuteAsync();
+        client.Push(UsageReading(5, 5));
+        Assert.Equal("Included usage limit reached", model.Usage.Summary);
+        model.InputText = "hello";
+        Assert.True(model.SendMessageCommand.CanExecute(null!));
+        client.Reading = Task.FromResult(CodexUsageSnapshot.Parse(JObject.Parse("{ordinaryUsageAllowed:true,rateLimits:{primary:{usedPercent:2}}}"))!);
+        await model.Usage.RefreshCommand.ExecuteAsync();
+        Assert.Contains("98% left", model.Usage.Summary);
+    }
+
     [Fact]
     public void InitialStateIsDisconnectedAndRequiresWorkspace()
     {
@@ -208,6 +287,16 @@ public sealed class CodexChatViewModelTests
         public int StartConversationCalls { get; private set; }
         public Task<CodexConversation>? ThreadStart { get; set; }
         public int CancelCalls { get; private set; }
+        public int UsageReads { get; private set; }
+        public Task<CodexUsageSnapshot> Reading { get; set; } = Task.FromResult(UsageReading(0, 0));
+        public event EventHandler<CodexUsageSnapshot>? UsageUpdated;
+        public void Push(CodexUsageSnapshot snapshot) => UsageUpdated?.Invoke(this, snapshot);
+        public Task<CodexUsageSnapshot> ReadUsageAsync(CancellationToken cancellationToken) { UsageReads++; return Reading; }
+        public void Authenticate(CodexAuthenticationState state)
+        {
+            Authentication = new CodexAuthenticationInfo(state);
+            AuthenticationChanged?.Invoke(this, Authentication);
+        }
         public List<string> SentMessages { get; } = new List<string>();
         public event EventHandler<CodexEventArgs>? EventReceived;
         public event EventHandler<CodexAuthenticationInfo>? AuthenticationChanged;

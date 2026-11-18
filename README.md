@@ -1,6 +1,6 @@
 # Codex for Visual Studio
 
-Version 0.1.9 adds a dockable **Codex Chat** window to Visual Studio. Ask questions about the open solution, read streamed answers, ask follow-ups in the same conversation, and interrupt a response. M1 is read-only.
+Version 0.1.10 shows your remaining Codex allowance in the dockable **Codex Chat** window. Ask questions about the open solution, read streamed answers, ask follow-ups in the same conversation, and interrupt a response. M1 is read-only.
 
 ## Install and open Codex Chat
 
@@ -9,6 +9,12 @@ Version 0.1.9 adds a dockable **Codex Chat** window to Visual Studio. Ask questi
 3. Select **View → Other Windows → Codex Chat**. Check the displayed solution directory, then click **Connect**. The extension starts the official local Codex App Server. If the CLI already has a ChatGPT login, the window displays **Connected and authenticated**. Otherwise, click **Sign In** and complete the official flow in your browser.
 4. Ask “What does this solution do? Point me to its entry point.” Press **Enter** or click **Send**. Use **Shift+Enter** for a new line. Select message text and press **Ctrl+C** to copy it.
 5. Ask a follow-up directly in the same window. **Cancel** interrupts a running turn. After **Codex turn interrupted** appears, you can send again. **New Conversation** starts a fresh thread. Changing solutions also clears the current conversation.
+
+## Check Codex usage
+
+After connecting or signing in, look beside **Read-only mode**. The usage button shows the Codex window with the lowest percentage remaining. Select it to see each reported window, its reset time in your local time zone, and the time of the last reading. Click **Refresh** to check again without sending a chat message. App Server notifications also update the display.
+
+**Included usage limit reached** appears when the server reports it. If usage is unavailable, you can still chat. A failed refresh keeps the previous reading and timestamp. The panel does not change your billing settings or decide whether to send a message.
 
 ## Approval policy
 
