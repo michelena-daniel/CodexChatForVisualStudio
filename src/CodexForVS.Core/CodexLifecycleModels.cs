@@ -35,17 +35,21 @@ public sealed class CodexConversation
     public string ApprovalPolicy { get; }
     public string ThreadId { get; }
     public string WorkspaceDirectory { get; }
+    internal string? Model { get; set; }
+    internal string? ReasoningEffort { get; set; }
+    internal SessionMode LastMode { get; set; } = SessionMode.Chat;
     public string? ActiveTurnId { get; internal set; }
     public ConversationTurnState State { get; internal set; }
     public string AssistantText { get; internal set; } = string.Empty;
     public string? ErrorMessage { get; internal set; }
 }
 
-public enum CodexConversationEventKind { AssistantDelta, AgentMessage, ToolActivity, TurnStarted, TurnCompleted, TurnInterrupted, TurnFailed, Error, Disconnected }
+public enum CodexConversationEventKind { AssistantDelta, AgentMessage, ToolActivity, TurnStarted, TurnCompleted, TurnInterrupted, TurnFailed, Error, Disconnected, PlanDelta, PlanCompleted }
 
 public sealed class CodexConversationEventArgs : EventArgs
 {
-    public CodexConversationEventArgs(CodexConversationEventKind kind, string threadId, string? turnId, string? text = null) { Kind = kind; ThreadId = threadId ?? throw new ArgumentNullException(nameof(threadId)); TurnId = turnId; Text = text; }
+    public CodexConversationEventArgs(CodexConversationEventKind kind, string threadId, string? turnId, string? text = null, string? itemId = null) { Kind = kind; ThreadId = threadId ?? throw new ArgumentNullException(nameof(threadId)); TurnId = turnId; Text = text; ItemId = itemId; }
+    public string? ItemId { get; }
     public CodexConversationEventKind Kind { get; }
     public string ThreadId { get; }
     public string? TurnId { get; }

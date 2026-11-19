@@ -24,8 +24,6 @@
     <VSCTCompile Include="CodexForVS.vsct">
       <ResourceName>Menus.ctmenu</ResourceName>
     </VSCTCompile>
-    <Content Include="source.extension.vsixmanifest">
-      <IncludeInVSIXContainer>true</IncludeInVSIXContainer>
-    </Content>
+    <SourceVsixManifest Include="source.extension.vsixmanifest" />
   </ItemGroup>
 </Project>

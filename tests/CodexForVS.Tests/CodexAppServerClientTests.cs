@@ -14,6 +14,73 @@ namespace CodexForVS.Tests;
 public sealed class CodexAppServerClientTests
 {
     [Theory]
+    [InlineData("never")]
+    [InlineData("untrusted")]
+    public async Task NativePlanAndFollowUpsUseExistingThreadModelAndReadOnlyPolicy(string policy)
+    {
+        FakeTransport transport = new FakeTransport();
+        using CodexAppServerClient client = new CodexAppServerClient(transport);
+        await client.StartAsync(CancellationToken.None);
+        CodexConversation thread = await client.StartConversationAsync(Workspace, CancellationToken.None, policy);
+        Assert.True((bool)transport.Requests[0].Parameters.SelectToken("capabilities.experimentalApi")!);
+
+        await Send("Discuss a greeting.", SessionMode.Chat);
+        await Send("How would you implement that?", SessionMode.Plan);
+        await Send("Simplify step two.", SessionMode.Plan);
+        await Send("Implement it.", SessionMode.Plan);
+        await Send("Back to chat.", SessionMode.Chat);
+
+        JObject[] turns = transport.Requests.Where(request => request.Method == "turn/start").Select(request => request.Parameters).ToArray();
+        Assert.Equal(new string?[] { null, "plan", "plan", "plan", "default" }, turns.Select(turn => (string?)turn.SelectToken("collaborationMode.mode")));
+        Assert.All(turns.Skip(1), turn =>
+        {
+            Assert.Equal("thread-model", (string?)turn.SelectToken("collaborationMode.settings.model"));
+            Assert.Equal("medium", (string?)turn.SelectToken("collaborationMode.settings.reasoning_effort"));
+            Assert.Equal(JTokenType.Null, turn.SelectToken("collaborationMode.settings.developer_instructions")!.Type);
+        });
+        Assert.All(turns, turn =>
+        {
+            Assert.Equal(thread.ThreadId, (string?)turn["threadId"]);
+            Assert.Equal(Workspace, (string?)turn["cwd"]);
+            Assert.Equal(policy, (string?)turn["approvalPolicy"]);
+            Assert.True(JToken.DeepEquals(JObject.Parse("{type:'readOnly',networkAccess:false}"), turn["sandboxPolicy"]));
+        });
+        Assert.Single(transport.Requests, request => request.Method == "thread/start");
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SendAsync("Implement", CancellationToken.None, SessionMode.Implement));
+
+        async Task Send(string text, SessionMode mode)
+        {
+            await client.SendAsync(text, CancellationToken.None, mode);
+            transport.Emit(TurnCompleted(thread.ThreadId, thread.ActiveTurnId!, "completed"));
+        }
+    }
+
+    [Fact]
+    public async Task NativePlanEventsAreCorrelatedAndFileApprovalIsDeclined()
+    {
+        FakeTransport transport = new FakeTransport();
+        using CodexAppServerClient client = new CodexAppServerClient(transport);
+        await client.StartAsync(CancellationToken.None);
+        CodexConversation thread = await client.StartConversationAsync(Workspace, CancellationToken.None);
+        await client.SendAsync("Implement it.", CancellationToken.None, SessionMode.Plan);
+        List<CodexConversationEventArgs> events = new List<CodexConversationEventArgs>();
+        client.ConversationEventReceived += (_, value) => events.Add(value);
+        JObject delta = new JObject { ["threadId"] = thread.ThreadId, ["turnId"] = "obsolete", ["itemId"] = "p", ["delta"] = "draft" };
+        transport.Emit(Notification("item/plan/delta", delta));
+        delta["turnId"] = thread.ActiveTurnId;
+        transport.Emit(Notification("item/plan/delta", delta));
+        transport.Emit(Notification("item/completed", new JObject { ["threadId"] = thread.ThreadId, ["turnId"] = thread.ActiveTurnId,
+            ["item"] = new JObject { ["type"] = "plan", ["id"] = "p", ["text"] = "final plan" } }));
+        Assert.Equal(new[] { CodexConversationEventKind.PlanDelta, CodexConversationEventKind.PlanCompleted }, events.Select(e => e.Kind));
+        Assert.All(events, e => Assert.Equal("p", e.ItemId));
+        Assert.Equal("final plan", events[1].Text);
+        transport.Emit(new JObject { ["id"] = 92, ["method"] = "item/fileChange/requestApproval", ["params"] = new JObject() });
+        await transport.ResponseReceived.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(92, (int)transport.ResponseId!);
+        Assert.Equal("decline", (string?)transport.Response!["decision"]);
+    }
+
+    [Theory]
     [InlineData(null, "never")]
     [InlineData("untrusted", "untrusted")]
     public async Task HandshakeAndReadOnlyThreadUseTransport(string? selection, string expected)
@@ -322,7 +389,7 @@ public sealed class CodexAppServerClientTests
                 "{ordinaryUsageAllowed:false,rateLimits:{limitId:'other'},rateLimitsByLimitId:{codex:{primary:{usedPercent:19,windowDurationMins:15,resetsAt:1700000000}}}}"));
             if (method == "account/read") return Task.FromResult(AccountResponse);
             if (method == "account/login/start") return CancelLoginRequest ? Task.FromCanceled<JObject>(new CancellationToken(true)) : Task.FromResult(new JObject { ["type"] = "chatgpt", ["loginId"] = "login-1", ["authUrl"] = "https://example.test/login" });
-            if (method == "thread/start") return Task.FromResult(new JObject { ["thread"] = new JObject { ["id"] = "thread-" + ++nextThread } });
+            if (method == "thread/start") return Task.FromResult(new JObject { ["model"] = "thread-model", ["reasoningEffort"] = "medium", ["thread"] = new JObject { ["id"] = "thread-" + ++nextThread } });
             if (method == "turn/start")
             {
                 string turnId = "turn-" + ++nextTurn;

@@ -20,12 +20,20 @@
       <Button DockPanel.Dock="Right" Margin="6,0,0,0" Padding="8,2" Command="{Binding SignInCommand}" Content="Sign In" />
     </DockPanel>
     <StackPanel Grid.Row="1" Margin="0,8,0,8">
-      <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+      <WrapPanel Margin="0,0,0,4">
+        <StackPanel Orientation="Horizontal" Margin="0,0,10,0">
+          <TextBlock Text="Mode" VerticalAlignment="Center" Margin="0,0,6,0" />
+          <ComboBox AutomationProperties.Name="Conversation mode" ItemsSource="{Binding Modes}"
+                    SelectedItem="{Binding Mode, Mode=TwoWay}" IsEnabled="{Binding CanChangeMode}"
+                    ToolTip="Plan a change or refine an existing plan in this conversation. Both modes are read-only." />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal">
         <TextBlock Text="Approval policy" VerticalAlignment="Center" Margin="0,0,6,0" />
         <ComboBox AutomationProperties.Name="Approval policy" ItemsSource="{Binding ApprovalPolicies}"
                   SelectedItem="{Binding ApprovalPolicy, Mode=TwoWay}" IsEnabled="{Binding CanChangePolicy}"
                   ToolTip="never runs sandbox-permitted commands. untrusted also blocks commands that need confirmation. Changing policy starts a fresh thread on your next send." />
-      </StackPanel>
+        </StackPanel>
+      </WrapPanel>
       <TextBlock Text="{Binding StatusMessage}" TextWrapping="Wrap" />
       <TextBlock Text="{Binding Activity}" TextWrapping="Wrap">
         <TextBlock.Style>

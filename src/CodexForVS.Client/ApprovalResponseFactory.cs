@@ -13,9 +13,11 @@ public static class ApprovalResponseFactory
                 response = new JObject { ["decision"] = "decline" };
                 return true;
             case "item/permissions/requestApproval":
-                response = new JObject { ["permissions"] = new JArray() };
+                response = new JObject { ["permissions"] = new JObject() };
                 return true;
             case "item/tool/requestUserInput":
+                response = new JObject { ["answers"] = new JObject() };
+                return true;
             case "mcpServer/elicitation/request":
                 response = new JObject { ["action"] = "decline", ["content"] = JValue.CreateNull() };
                 return true;

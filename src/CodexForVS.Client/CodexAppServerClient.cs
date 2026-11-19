@@ -69,7 +69,11 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
         }
         try
         {
-            await activeTransport.RequestAsync("initialize", new JObject { ["clientInfo"] = new JObject { ["name"] = "codex_for_visual_studio", ["title"] = "Codex for Visual Studio", ["version"] = "0.1.0" } }, cancellationToken).ConfigureAwait(false);
+            await activeTransport.RequestAsync("initialize", new JObject
+            {
+                ["clientInfo"] = new JObject { ["name"] = "codex_for_visual_studio", ["title"] = "Codex for Visual Studio", ["version"] = "0.1.11" },
+                ["capabilities"] = new JObject { ["experimentalApi"] = true }
+            }, cancellationToken).ConfigureAwait(false);
             await activeTransport.NotifyAsync("initialized", new JObject(), cancellationToken).ConfigureAwait(false);
             JObject account = await activeTransport.RequestAsync("account/read", new JObject(), cancellationToken).ConfigureAwait(false);
             SetAuthentication(ParseAuthentication(account));
@@ -112,17 +116,22 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
         JObject response = await RequireTransport().RequestAsync("thread/start", CreateThreadStartParameters(fullWorkspaceDirectory, ReadOnlyApprovalPolicy.Validate(approvalPolicy)), cancellationToken).ConfigureAwait(false);
         string? threadId = (string?)response.SelectToken("thread.id");
         if (string.IsNullOrWhiteSpace(threadId)) throw new InvalidOperationException("Codex did not return a thread ID.");
-        CodexConversation newConversation = new CodexConversation(threadId!, fullWorkspaceDirectory, approvalPolicy);
+        CodexConversation newConversation = new CodexConversation(threadId!, fullWorkspaceDirectory, approvalPolicy)
+        {
+            Model = (string?)response["model"],
+            ReasoningEffort = (string?)response["reasoningEffort"]
+        };
         lock (lifecycleGate) { ThrowIfDisposed(); turnStarted?.TrySetResult(null); conversation = newConversation; }
         PublishConversation(new CodexConversationEventArgs(CodexConversationEventKind.TurnStarted, threadId!, null, "Conversation started."));
         return newConversation;
     }
 
-    public Task SendAsync(string text, CancellationToken cancellationToken) => SendMessageAsync(text, cancellationToken);
+    public Task SendMessageAsync(string text, CancellationToken cancellationToken) => SendAsync(text, cancellationToken);
 
-    public async Task SendMessageAsync(string text, CancellationToken cancellationToken)
+    public async Task SendAsync(string text, CancellationToken cancellationToken, SessionMode mode = SessionMode.Chat)
     {
         if (string.IsNullOrWhiteSpace(text)) throw new ArgumentException("A message is required.", nameof(text));
+        if (mode != SessionMode.Plan && mode != SessionMode.Chat) throw new ArgumentOutOfRangeException(nameof(mode));
         await turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -143,7 +152,8 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
             lock (lifecycleGate) { ThrowIfDisposed(); turnStarted = ready; }
             try
             {
-                JObject response = await RequireTransport().RequestAsync("turn/start", CreateTurnStartParameters(activeConversation, text), cancellationToken).ConfigureAwait(false);
+                JObject response = await RequireTransport().RequestAsync("turn/start", CreateTurnStartParameters(activeConversation, text, mode), cancellationToken).ConfigureAwait(false);
+                activeConversation.LastMode = mode;
                 string? turnId = (string?)response.SelectToken("turn.id");
                 if (string.IsNullOrWhiteSpace(turnId)) throw new InvalidOperationException("Codex did not return a turn ID.");
                 // The request acknowledgement can precede the server installing the active turn.
@@ -193,8 +203,34 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
         finally { turnGate.Release(); }
     }
 
-    private static JObject CreateThreadStartParameters(string workspaceDirectory, string approvalPolicy) => new JObject { ["cwd"] = workspaceDirectory, ["modelProvider"] = "openai", ["sandbox"] = "read-only", ["approvalPolicy"] = approvalPolicy, ["developerInstructions"] = "You are in the open Visual Studio solution directory. For questions about this repository, use the available read-only shell tools to list files and inspect relevant source and documentation here before answering. Cite the files you inspected. If a read fails, explain the specific obstacle. Never edit files, apply patches, or request elevated permissions." };
-    private static JObject CreateTurnStartParameters(CodexConversation conversation, string text) => new JObject { ["threadId"] = conversation.ThreadId, ["cwd"] = conversation.WorkspaceDirectory, ["input"] = new JArray(new JObject { ["type"] = "text", ["text"] = text }), ["sandboxPolicy"] = new JObject { ["type"] = "readOnly", ["networkAccess"] = false }, ["approvalPolicy"] = conversation.ApprovalPolicy };
+    private static JObject CreateThreadStartParameters(string workspaceDirectory, string approvalPolicy) => new JObject { ["cwd"] = workspaceDirectory, ["modelProvider"] = "openai", ["sandbox"] = "read-only", ["approvalPolicy"] = approvalPolicy, ["developerInstructions"] = "You are in the open Visual Studio solution directory. For questions about this repository, use the available read-only shell tools to list files and inspect relevant source and documentation here before answering. Cite the files you inspected. If a read fails, explain the specific obstacle. Never edit files, apply patches, or request elevated permissions. In Plan mode, use the conversation so far to propose or refine a plan. Identify relevant files, implementation steps, and how to verify the result. Ask any clarifying questions directly in chat." };
+    private static JObject CreateTurnStartParameters(CodexConversation conversation, string text, SessionMode mode)
+    {
+        JObject parameters = new JObject
+        {
+            ["threadId"] = conversation.ThreadId,
+            ["cwd"] = conversation.WorkspaceDirectory,
+            ["input"] = new JArray(new JObject { ["type"] = "text", ["text"] = text }),
+            ["sandboxPolicy"] = new JObject { ["type"] = "readOnly", ["networkAccess"] = false },
+            ["approvalPolicy"] = conversation.ApprovalPolicy
+        };
+        // A collaboration mode persists on the server. Explicitly restore default on leaving Plan.
+        if (mode == SessionMode.Plan || conversation.LastMode == SessionMode.Plan)
+        {
+            if (string.IsNullOrWhiteSpace(conversation.Model)) throw new InvalidOperationException("Codex did not report the thread model required for Plan mode.");
+            parameters["collaborationMode"] = new JObject
+            {
+                ["mode"] = mode == SessionMode.Plan ? "plan" : "default",
+                ["settings"] = new JObject
+                {
+                    ["model"] = conversation.Model,
+                    ["reasoning_effort"] = conversation.ReasoningEffort,
+                    ["developer_instructions"] = null // Use the CLI's built-in instructions for this mode.
+                }
+            };
+        }
+        return parameters;
+    }
 
     private void AttachProcess(ICodexProcess value) { value.Exited += OnProcessExited; value.StandardErrorReceived += OnStandardErrorReceived; }
     private void AttachTransport(IJsonRpcTransport value) { value.MessageReceived += OnMessage; value.Faulted += OnTransportFaulted; }
@@ -219,6 +255,8 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
                 case "account/login/completed": HandleLoginCompleted(parameters); break;
                 case "turn/started": HandleTurnStarted(parameters); break;
                 case "item/agentMessage/delta": HandleAssistantDelta(parameters); break;
+                case "item/plan/delta": HandlePlanItem(parameters, false); break;
+                case "item/completed" when (string?)parameters?.SelectToken("item.type") == "plan": HandlePlanItem(parameters, true); break;
                 case "item/started": case "item/completed": HandleToolActivity(parameters, method == "item/completed"); break;
                 case "turn/completed": HandleTurnCompleted(parameters); break;
             }
@@ -239,6 +277,19 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
         CodexConversation? activeConversation = CurrentConversation;
         if (activeConversation == null || activeConversation.ThreadId != threadId || activeConversation.ActiveTurnId != turnId) return;
         activeConversation.AssistantText += delta; Publish("delta", delta); PublishConversation(new CodexConversationEventArgs(CodexConversationEventKind.AssistantDelta, threadId, turnId, delta));
+    }
+
+    private void HandlePlanItem(JObject? parameters, bool completed)
+    {
+        string? threadId = (string?)parameters?["threadId"];
+        string? turnId = (string?)parameters?["turnId"];
+        string? itemId = completed ? (string?)parameters?.SelectToken("item.id") : (string?)parameters?["itemId"];
+        string? text = completed ? (string?)parameters?.SelectToken("item.text") : (string?)parameters?["delta"];
+        CodexConversation? active = CurrentConversation;
+        if (active == null || active.ThreadId != threadId || turnId == null || active.ActiveTurnId != turnId ||
+            string.IsNullOrEmpty(itemId) || text == null) return;
+        PublishConversation(new CodexConversationEventArgs(completed ? CodexConversationEventKind.PlanCompleted :
+            CodexConversationEventKind.PlanDelta, active.ThreadId, turnId, text, itemId));
     }
 
     private void HandleTurnStarted(JObject? parameters)

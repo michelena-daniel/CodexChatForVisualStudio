@@ -12,6 +12,41 @@ namespace CodexForVS.Tests;
 
 public sealed class CodexChatViewModelTests
 {
+    [Fact]
+    public async Task SwitchingToPlanKeepsDiscussionAndRendersEachPlanItemOnce()
+    {
+        FakeClient client = new FakeClient(CodexAuthenticationState.Authenticated);
+        using CodexChatViewModel model = Create(new FakeWorkspaceContext(Workspace), client);
+        await model.ConnectAsync();
+        model.InputText = "Let's discuss greetings.";
+        await model.SendMessageAsync();
+        model.Mode = SessionMode.Plan;
+        Assert.Equal(SessionMode.Chat, model.Mode);
+        client.CompleteCurrentTurn("completed");
+
+        CodexConversation discussion = model.CurrentConversation!;
+        model.Mode = SessionMode.Plan;
+        model.InputText = "How would you implement it?";
+        await model.SendMessageAsync();
+        client.EmitPlan(CodexConversationEventKind.PlanDelta, "p", "draft");
+        client.EmitPlan(CodexConversationEventKind.PlanDelta, "p", " text");
+        ChatMessage plan = model.Messages[2];
+        Assert.Equal("draft text", plan.Content);
+        client.EmitPlan(CodexConversationEventKind.PlanCompleted, "p", "Authoritative plan");
+        client.EmitPlan(CodexConversationEventKind.PlanCompleted, "p", "Authoritative plan");
+        Assert.Equal("Authoritative plan", plan.Content);
+        Assert.Equal(3, model.Messages.Count);
+        client.CompleteCurrentTurn("completed");
+        model.InputText = "Simplify step two.";
+        await model.SendMessageAsync();
+        client.EmitPlan(CodexConversationEventKind.PlanCompleted, "revision", "Simplified plan");
+        Assert.Equal("Simplified plan", model.Messages[4].Content);
+        Assert.Equal(new[] { SessionMode.Chat, SessionMode.Plan, SessionMode.Plan }, client.SentModes);
+        Assert.Equal("Let's discuss greetings.", model.Messages[0].Content);
+        Assert.Same(discussion, model.CurrentConversation);
+        Assert.Equal(1, client.StartConversationCalls);
+    }
+
     private static CodexUsageSnapshot UsageReading(int primaryUsed, int weeklyUsed) =>
         CodexUsageSnapshot.Parse(new JObject { ["rateLimits"] = new JObject {
             ["primary"] = new JObject { ["usedPercent"] = primaryUsed, ["windowDurationMins"] = 300 },
@@ -194,6 +229,9 @@ public sealed class CodexChatViewModelTests
         var gate = new TaskCompletionSource<CodexConversation>(TaskCreationOptions.RunContinuationsAsynchronously);
         client.ThreadStart = gate.Task;
         Task send = viewModel.SendMessageCommand.ExecuteAsync();
+        Assert.False(viewModel.CanChangeMode);
+        viewModel.Mode = SessionMode.Plan;
+        Assert.Equal(SessionMode.Chat, viewModel.Mode);
         Assert.Empty(client.SentMessages);
         gate.SetResult(client.CurrentConversation!);
         await send.WaitAsync(TimeSpan.FromSeconds(5));
@@ -309,8 +347,10 @@ public sealed class CodexChatViewModelTests
             CurrentConversation = new CodexConversation("thread-" + StartConversationCalls, workspaceDirectory, approvalPolicy);
             return ThreadStart ?? Task.FromResult(CurrentConversation);
         }
-        public Task SendAsync(string text, CancellationToken cancellationToken)
+        public List<SessionMode> SentModes { get; } = new List<SessionMode>();
+        public Task SendAsync(string text, CancellationToken cancellationToken, SessionMode mode = SessionMode.Chat)
         {
+            SentModes.Add(mode);
             SentMessages.Add(text);
             CurrentConversation!.ActiveTurnId = "turn-1";
             CurrentConversation.State = ConversationTurnState.Running;
@@ -327,6 +367,8 @@ public sealed class CodexChatViewModelTests
         }
         public void EmitConversation(CodexConversationEventKind kind, string threadId, string? turnId, string? text) => ConversationEventReceived?.Invoke(this, new CodexConversationEventArgs(kind, threadId, turnId, text));
         public void EmitError(string text) => EventReceived?.Invoke(this, new CodexEventArgs("error", text));
+        public void EmitPlan(CodexConversationEventKind kind, string itemId, string text) => ConversationEventReceived?.Invoke(
+            this, new CodexConversationEventArgs(kind, CurrentConversation!.ThreadId, CurrentConversation.ActiveTurnId, text, itemId));
         public void Dispose() { }
     }
 }

@@ -18,7 +18,7 @@ public interface ICodexAppServerClient : System.IDisposable
     event EventHandler<CodexUsageSnapshot>? UsageUpdated;
     Task<CodexLoginRequest> SignInAsync(CancellationToken cancellationToken);
     Task<CodexConversation> StartConversationAsync(string workspaceDirectory, CancellationToken cancellationToken, string approvalPolicy = ReadOnlyApprovalPolicy.Never);
-    Task SendAsync(string text, CancellationToken cancellationToken);
+    Task SendAsync(string text, CancellationToken cancellationToken, SessionMode mode = SessionMode.Chat);
     Task CancelAsync(CancellationToken cancellationToken);
     event EventHandler<CodexEventArgs>? EventReceived;
     event EventHandler<CodexAuthenticationInfo>? AuthenticationChanged;

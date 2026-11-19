@@ -1,6 +1,6 @@
 # Codex for Visual Studio
 
-Version 0.1.10 shows your remaining Codex allowance in the dockable **Codex Chat** window. Ask questions about the open solution, read streamed answers, ask follow-ups in the same conversation, and interrupt a response. M1 is read-only.
+Version 0.1.11 adds **Plan** to the dockable **Codex Chat** window. Discuss a change, switch to Plan, and refine the proposal in the same conversation. Both Chat and Plan use the read-only sandbox.
 
 ## Install and open Codex Chat
 
@@ -9,6 +9,14 @@ Version 0.1.10 shows your remaining Codex allowance in the dockable **Codex Chat
 3. Select **View → Other Windows → Codex Chat**. Check the displayed solution directory, then click **Connect**. The extension starts the official local Codex App Server. If the CLI already has a ChatGPT login, the window displays **Connected and authenticated**. Otherwise, click **Sign In** and complete the official flow in your browser.
 4. Ask “What does this solution do? Point me to its entry point.” Press **Enter** or click **Send**. Use **Shift+Enter** for a new line. Select message text and press **Ctrl+C** to copy it.
 5. Ask a follow-up directly in the same window. **Cancel** interrupts a running turn. After **Codex turn interrupted** appears, you can send again. **New Conversation** starts a fresh thread. Changing solutions also clears the current conversation.
+
+## Plan a change
+
+Between turns, select **Plan** in the **Mode** selector and send your question. Codex can inspect the solution and use the discussion so far to identify files, steps, and verification. The plan streams into the transcript, where its final text replaces the draft. Stay in Plan for revisions or switch back to **Chat** to resume ordinary discussion. Switching modes keeps the thread, history, model, and selected approval policy. Asking to implement a plan still runs a read-only turn.
+
+This release uses the native experimental collaboration mode of Codex CLI 0.169.0. The extension opts in during initialization and sends the mode with the thread’s existing model on `turn/start`. The CLI supplies the built-in planning instructions. To inspect this contract locally, run `codex app-server generate-json-schema --experimental --out <directory>`. [Official Codex App Server documentation](https://developers.openai.com/codex/app-server/)
+
+**Quick check in Visual Studio 2026.** Open a disposable solution and discuss one specific change in Chat. Select Plan and ask “How would you implement what we just discussed?” Check for one plan that refers to that change. Ask “Can you simplify step two?” and then “Implement it.” Compare the solution files with their starting state, including any untracked files or existing edits.
 
 ## Check Codex usage
 
@@ -43,7 +51,7 @@ dotnet build CodexForVS.sln --no-restore -v minimal
 dotnet test CodexForVS.sln --no-restore -v minimal --blame-hang-timeout 30s
 ```
 
-The Debug installer is `src\CodexForVS.Extension\bin\Debug\net48\CodexForVS.Extension.vsix`. The manifest also targets x64 VS 2022. This release's live acceptance was performed on VS 2026.
+The Debug installer is `src\CodexForVS.Extension\bin\Debug\net48\CodexForVS.Extension.vsix`. The manifest also targets x64 VS 2022. The chat and Usage footer were validated in VS 2026 on 0.1.10.
 
 - **Extension** hosts the in-process VSSDK/WPF tool window and reports the active solution directory.
 - **Client** manages the Codex process, JSONL transport, authentication, threads, turns, and chat ViewModel.

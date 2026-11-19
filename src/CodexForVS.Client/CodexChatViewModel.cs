@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
@@ -28,6 +29,9 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
     private ChatMessage? streamingAssistantMessage;
     private bool disposed;
     private bool startingConversation;
+    private bool submittingTurn;
+    private SessionMode mode = SessionMode.Chat;
+    private readonly Dictionary<string, ChatMessage> planItems = new Dictionary<string, ChatMessage>();
     private string approvalPolicy;
 
     public CodexChatViewModel(ICodexAppServerClient client, IWorkspaceContext workspaceContext, IUiDispatcher dispatcher, string initialPolicy = ReadOnlyApprovalPolicy.Never)
@@ -54,6 +58,18 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
 
     public ObservableCollection<ChatMessage> Messages { get; }
     public CodexUsageViewModel Usage { get; }
+    public IReadOnlyList<SessionMode> Modes { get; } = Array.AsReadOnly(new[] { SessionMode.Chat, SessionMode.Plan });
+    public bool CanChangeMode => !submittingTurn && CanChangePolicy;
+    public SessionMode Mode
+    {
+        get => mode;
+        set
+        {
+            if (value == mode || !CanChangeMode || (value != SessionMode.Chat && value != SessionMode.Plan)) return;
+            mode = value;
+            OnPropertyChanged();
+        }
+    }
     public string[] ApprovalPolicies { get; } = { ReadOnlyApprovalPolicy.Never, ReadOnlyApprovalPolicy.Untrusted };
     public bool CanChangePolicy => !startingConversation && !IsTurnActive && ConnectionState != ChatConnectionState.Running;
     public string ApprovalPolicy
@@ -141,8 +157,11 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
 
     public async Task SendMessageAsync()
     {
-        if (!CanSend) return;
+        if (!CanSend || submittingTurn) return;
         string message = InputText;
+        SessionMode turnMode = Mode;
+        submittingTurn = true;
+        OnPropertyChanged(nameof(CanChangeMode));
         try
         {
             if (CurrentConversation == null) await NewConversationAsync();
@@ -151,11 +170,12 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
             {
                 if (InputText == message) InputText = string.Empty;
                 Messages.Add(new ChatMessage("user", message));
+                planItems.Clear();
                 Activity = string.Empty;
                 streamingAssistantMessage = null;
                 ErrorMessage = null;
             });
-            await client.SendAsync(message, lifetimeCancellation.Token).ConfigureAwait(false);
+            await client.SendAsync(message, lifetimeCancellation.Token, turnMode).ConfigureAwait(false);
             await dispatcher.InvokeAsync(() =>
             {
                 if (CurrentConversation?.State != ConversationTurnState.Running) return;
@@ -169,6 +189,7 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
             await dispatcher.InvokeAsync(ApplyConnectionState).ConfigureAwait(false);
         }
         catch { await dispatcher.InvokeAsync(() => { ConnectionState = ChatConnectionState.Error; ErrorMessage = "Could not send the message to Codex."; StatusMessage = "Message failed."; }).ConfigureAwait(false); }
+        finally { await dispatcher.InvokeAsync(() => { submittingTurn = false; OnPropertyChanged(nameof(CanChangeMode)); }).ConfigureAwait(false); }
     }
 
     public async Task CancelTurnAsync()
@@ -219,6 +240,18 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
                 if (streamingAssistantMessage == null) { streamingAssistantMessage = new ChatMessage("assistant", string.Empty); Messages.Add(streamingAssistantMessage); }
                 streamingAssistantMessage.Content += value.Text ?? string.Empty;
                 break;
+            case CodexConversationEventKind.PlanDelta:
+            case CodexConversationEventKind.PlanCompleted:
+                if (value.ItemId == null) break;
+                streamingAssistantMessage = null;
+                if (!planItems.TryGetValue(value.ItemId, out ChatMessage plan))
+                {
+                    plan = new ChatMessage("Plan", string.Empty);
+                    planItems.Add(value.ItemId, plan);
+                    Messages.Add(plan);
+                }
+                plan.Content = value.Kind == CodexConversationEventKind.PlanCompleted ? value.Text ?? string.Empty : plan.Content + value.Text;
+                break;
             case CodexConversationEventKind.ToolActivity:
                 streamingAssistantMessage = null;
                 Activity = value.Text ?? string.Empty;
@@ -261,7 +294,7 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
         else { ConnectionState = ChatConnectionState.AuthenticationRequired; StatusMessage = "Sign in with your ChatGPT subscription to continue."; }
     }
     private void Dispatch(Action action) { if (disposed) return; _ = dispatcher.InvokeAsync(() => { if (!disposed) action(); }); }
-    private void RefreshCommands() { OnPropertyChanged(nameof(CanChangePolicy)); ConnectCommand.RaiseCanExecuteChanged(); SignInCommand.RaiseCanExecuteChanged(); SendMessageCommand.RaiseCanExecuteChanged(); CancelTurnCommand.RaiseCanExecuteChanged(); NewConversationCommand.RaiseCanExecuteChanged(); }
+    private void RefreshCommands() { OnPropertyChanged(nameof(CanChangeMode)); OnPropertyChanged(nameof(CanChangePolicy)); ConnectCommand.RaiseCanExecuteChanged(); SignInCommand.RaiseCanExecuteChanged(); SendMessageCommand.RaiseCanExecuteChanged(); CancelTurnCommand.RaiseCanExecuteChanged(); NewConversationCommand.RaiseCanExecuteChanged(); }
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 
     public void Dispose()
