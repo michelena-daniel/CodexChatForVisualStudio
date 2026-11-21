@@ -132,6 +132,9 @@ Later
 - Hunk-level acceptance, solution/editor context attachments, richer plan UI, multiple sessions, provider abstraction, packaging and marketplace publishing.
 
 Workflow for Codex contributors
+
+For each repository feature or fix, branch from current `origin/main` and open a pull request against `main`. Follow [CONTRIBUTING.md](CONTRIBUTING.md) for branch names, quality gates, and the maintainer's merge decision.
+
 1. Read this file and the current repository before changes.
 2. State assumptions and risks. Verify unknown APIs against official documentation or installed SDK sources.
 3. Propose a short plan and implement only the current milestone.
