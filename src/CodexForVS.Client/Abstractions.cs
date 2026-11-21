@@ -11,6 +11,7 @@ public interface IJsonRpcTransport : IDisposable
     event EventHandler<Exception>? Faulted;
     Task<JObject> RequestAsync(string method, JObject parameters, CancellationToken cancellationToken);
     Task NotifyAsync(string method, JObject parameters, CancellationToken cancellationToken);
+    Task RejectAsync(JToken id, CancellationToken cancellationToken);
     Task RespondAsync(JToken id, JObject result, CancellationToken cancellationToken);
 }
 
@@ -25,5 +26,6 @@ public interface ICodexProcess : IDisposable
 public interface IWorkspaceContext
 {
     string? WorkspacePath { get; }
+    string? SolutionFilePath { get; }
     event EventHandler? WorkspaceChanged;
 }

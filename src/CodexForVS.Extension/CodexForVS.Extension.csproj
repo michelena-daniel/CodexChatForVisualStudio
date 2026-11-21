@@ -26,4 +26,9 @@
     </VSCTCompile>
     <SourceVsixManifest Include="source.extension.vsixmanifest" />
   </ItemGroup>
+  <!-- VSSDK 17.14 can reuse a previous detokenized manifest across version bumps. -->
+  <Target Name="InvalidateStaleVsixManifest" BeforeTargets="DetokenizeVsixManifestFile"
+          Inputs="@(SourceVsixManifest)" Outputs="$(IntermediateVsixManifest)">
+    <Delete Files="$(IntermediateVsixManifest)" Condition="Exists('$(IntermediateVsixManifest)')" />
+  </Target>
 </Project>

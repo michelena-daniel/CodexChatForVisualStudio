@@ -15,7 +15,7 @@ public sealed class CodexAppServerProcess : ICodexProcess
     {
         if (transport is not null) return transport;
         UTF8Encoding utf8 = new UTF8Encoding(false);
-        ProcessStartInfo startInfo = new ProcessStartInfo(CodexExecutable.Resolve(), "app-server --listen stdio://") { RedirectStandardInput=true, RedirectStandardOutput=true, RedirectStandardError=true, StandardOutputEncoding=utf8, StandardErrorEncoding=utf8, UseShellExecute=false, CreateNoWindow=true };
+        ProcessStartInfo startInfo = new ProcessStartInfo(CodexExecutable.Resolve(), "app-server --listen stdio:// -c windows.sandbox=elevated --disable hooks --disable apps --disable plugins --disable computer_use --disable multi_agent_v2") { WorkingDirectory=Environment.SystemDirectory, RedirectStandardInput=true, RedirectStandardOutput=true, RedirectStandardError=true, StandardOutputEncoding=utf8, StandardErrorEncoding=utf8, UseShellExecute=false, CreateNoWindow=true };
         startInfo.EnvironmentVariables.Remove("OPENAI_API_KEY");
         startInfo.EnvironmentVariables.Remove("CODEX_API_KEY");
         process = new Process { StartInfo=startInfo, EnableRaisingEvents=true };

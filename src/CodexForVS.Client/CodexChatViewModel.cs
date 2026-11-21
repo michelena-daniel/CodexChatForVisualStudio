@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -33,8 +34,39 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
     private SessionMode mode = SessionMode.Chat;
     private readonly Dictionary<string, ChatMessage> planItems = new Dictionary<string, ChatMessage>();
     private string approvalPolicy;
+    private const string DefaultModel = "CLI default";
+    private string selectedModel = DefaultModel;
+    private string? planForImplementation;
+    private int workspaceGeneration;
+    private string? solutionFile;
+    public ObservableCollection<string> Models { get; } = new ObservableCollection<string> { DefaultModel };
+    public string? SelectedModel
+    {
+        get => selectedModel;
+        set
+        {
+            if (value == selectedModel || !CanChangeMode || value == null || !Models.Contains(value)) return;
+            selectedModel = value;
+            CurrentConversation = null;
+            StatusMessage = "The next conversation will use " + value + ".";
+            OnPropertyChanged();
+        }
+    }
+    public FileReviewViewModel Review { get; }
+    public AsyncCommand SetupSandboxCommand { get; }
+    public bool NeedsSandboxSetup { get; private set; }
+    private async Task SetupSandboxAsync()
+    {
+        try
+        {
+            if (Worktree.Session == null || !NeedsSandboxSetup) return;
+            StatusMessage = "Starting the official Codex Windows sandbox setup.";
+            await client.SetupWindowsSandboxAsync(Worktree.Session,lifetimeCancellation.Token);
+        }
+        catch (Exception) { ErrorMessage = "Codex could not start Windows sandbox setup."; }
+    }
 
-    public CodexChatViewModel(ICodexAppServerClient client, IWorkspaceContext workspaceContext, IUiDispatcher dispatcher, string initialPolicy = ReadOnlyApprovalPolicy.Never)
+    public CodexChatViewModel(ICodexAppServerClient client, IWorkspaceContext workspaceContext, IUiDispatcher dispatcher, string initialPolicy = ReadOnlyApprovalPolicy.Never, IWorktreeService? worktreeService = null, IReviewEditor? editor = null)
     {
         this.client = client ?? throw new ArgumentNullException(nameof(client));
         this.workspaceContext = workspaceContext ?? throw new ArgumentNullException(nameof(workspaceContext));
@@ -43,11 +75,16 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
         approvalPolicy = ReadOnlyApprovalPolicy.Validate(initialPolicy);
         Messages = new ObservableCollection<ChatMessage>();
         Usage = new CodexUsageViewModel(client, dispatcher);
+        Worktree = new WorktreePreparationViewModel(worktreeService ?? new GitWorktreeService(), dispatcher);
+        Review = new FileReviewViewModel(editor,dispatcher);
+        Worktree.PropertyChanged += OnWorktreeChanged;
+        Review.PropertyChanged += OnReviewChanged;
+        SetupSandboxCommand = new AsyncCommand(SetupSandboxAsync,() => !disposed && Worktree.Session != null && NeedsSandboxSetup && !IsTurnActive);
         ConnectCommand = new AsyncCommand(ConnectAsync, () => ConnectionState != ChatConnectionState.Connecting && !disposed);
         SignInCommand = new AsyncCommand(SignInAsync, () => Authentication.State == CodexAuthenticationState.AuthenticationRequired && !disposed);
         SendMessageCommand = new AsyncCommand(SendMessageAsync, () => CanSend);
         CancelTurnCommand = new AsyncCommand(CancelTurnAsync, () => IsTurnActive);
-        NewConversationCommand = new AsyncCommand(NewConversationAsync, () => CanStartConversation);
+        NewConversationCommand = new AsyncCommand(NewConversationAsync, () => !submittingTurn && CanStartConversation);
         client.EventReceived += OnClientEventReceived;
         client.AuthenticationChanged += OnAuthenticationChanged;
         client.UsageUpdated += OnUsageUpdated;
@@ -58,20 +95,27 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
 
     public ObservableCollection<ChatMessage> Messages { get; }
     public CodexUsageViewModel Usage { get; }
-    public IReadOnlyList<SessionMode> Modes { get; } = Array.AsReadOnly(new[] { SessionMode.Chat, SessionMode.Plan });
-    public bool CanChangeMode => !submittingTurn && CanChangePolicy;
+    public WorktreePreparationViewModel Worktree { get; }
+    public IReadOnlyList<SessionMode> Modes => Worktree.Session == null ? new[] { SessionMode.Chat, SessionMode.Plan } : new[] { SessionMode.Chat, SessionMode.Plan, SessionMode.Implement };
+    public bool CanChangeMode => CanChangePolicy;
     public SessionMode Mode
     {
         get => mode;
         set
         {
-            if (value == mode || !CanChangeMode || (value != SessionMode.Chat && value != SessionMode.Plan)) return;
+            if (value == mode || !CanChangeMode || !Modes.Contains(value)) return;
+            if (mode == SessionMode.Implement || value == SessionMode.Implement)
+            {
+                planForImplementation = value == SessionMode.Implement ? Messages.LastOrDefault(m => m.Role == "Plan")?.Content : null;
+                CurrentConversation = null;
+                StatusMessage = value == SessionMode.Implement ? "Implement will run in the prepared worktree." : "Next message starts a read-only solution thread.";
+            }
             mode = value;
             OnPropertyChanged();
         }
     }
     public string[] ApprovalPolicies { get; } = { ReadOnlyApprovalPolicy.Never, ReadOnlyApprovalPolicy.Untrusted };
-    public bool CanChangePolicy => !startingConversation && !IsTurnActive && ConnectionState != ChatConnectionState.Running;
+    public bool CanChangePolicy => !submittingTurn && !startingConversation && !IsTurnActive && ConnectionState != ChatConnectionState.Running;
     public string ApprovalPolicy
     {
         get => approvalPolicy;
@@ -106,7 +150,7 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
     public CodexConversation? CurrentConversation { get => conversation; private set { conversation = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsTurnActive)); RefreshCommands(); } }
     public bool IsTurnActive => CurrentConversation != null && (CurrentConversation.State == ConversationTurnState.Starting || CurrentConversation.State == ConversationTurnState.Running || CurrentConversation.State == ConversationTurnState.Cancelling);
     private bool HasWorkspace => !string.IsNullOrWhiteSpace(WorkspacePath) && Directory.Exists(WorkspacePath);
-    private bool CanStartConversation => ConnectionState == ChatConnectionState.Ready && Authentication.State == CodexAuthenticationState.Authenticated && HasWorkspace && CanChangePolicy;
+    private bool CanStartConversation => !Review.Busy && !startingConversation && !IsTurnActive && ConnectionState == ChatConnectionState.Ready && Authentication.State == CodexAuthenticationState.Authenticated && HasWorkspace && (Mode != SessionMode.Implement || Worktree.Session != null);
     private bool CanSend => CanStartConversation && !string.IsNullOrWhiteSpace(InputText);
 
     public async Task ConnectAsync()
@@ -139,33 +183,50 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
         catch { await dispatcher.InvokeAsync(() => { ErrorMessage = "Could not start ChatGPT sign-in."; StatusMessage = "Sign-in failed."; }).ConfigureAwait(false); }
     }
 
-    public async Task NewConversationAsync()
+    public Task NewConversationAsync() => StartConversationAsync(true);
+
+    private async Task StartConversationAsync(bool clearHistory)
     {
-        if (!CanStartConversation) return;
+        if (!CanStartConversation || (clearHistory && submittingTurn)) return;
         startingConversation = true;
         RefreshCommands();
         ErrorMessage = null;
         try
         {
-            CodexConversation newConversation = await client.StartConversationAsync(WorkspacePath, lifetimeCancellation.Token, ApprovalPolicy).ConfigureAwait(false);
-            await dispatcher.InvokeAsync(() => { CurrentConversation = newConversation; streamingAssistantMessage = null; Messages.Clear(); Activity = string.Empty; StatusMessage = "New read-only conversation started."; }).ConfigureAwait(false);
+            int generation = workspaceGeneration;
+            WorktreeSession? isolated = Mode == SessionMode.Implement ? Worktree.Session : null;
+            CodexConversation newConversation = await client.StartConversationAsync(isolated?.WorktreePath ?? WorkspacePath, lifetimeCancellation.Token, ApprovalPolicy, isolated, SelectedModel == DefaultModel ? null : SelectedModel).ConfigureAwait(false);
+            await dispatcher.InvokeAsync(() =>
+            {
+                if (generation != workspaceGeneration || disposed) return;
+                CurrentConversation = newConversation; streamingAssistantMessage = null; Activity = string.Empty;
+                if (clearHistory) { Messages.Clear(); planForImplementation = null; }
+                StatusMessage = isolated == null ? "New read-only conversation started." : "Implementation thread started in " + isolated.WorktreePath;
+            }).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (lifetimeCancellation.IsCancellationRequested) { }
-        catch { await dispatcher.InvokeAsync(() => { ErrorMessage = "Could not start a Codex conversation for this solution."; StatusMessage = "Conversation failed to start."; }).ConfigureAwait(false); }
+        catch (Exception error) { await dispatcher.InvokeAsync(() =>
+        {
+            if (error is SandboxSetupRequiredException) { NeedsSandboxSetup = true; OnPropertyChanged(nameof(NeedsSandboxSetup)); SetupSandboxCommand.RaiseCanExecuteChanged(); }
+            ErrorMessage = error is InvalidOperationException || error is IOException ? error.Message : "Could not start a Codex conversation for this solution.";
+            StatusMessage = "Conversation failed to start.";
+        }).ConfigureAwait(false); }
         finally { await dispatcher.InvokeAsync(() => { startingConversation = false; RefreshCommands(); }).ConfigureAwait(false); }
     }
 
     public async Task SendMessageAsync()
     {
         if (!CanSend || submittingTurn) return;
+        int generation = workspaceGeneration;
         string message = InputText;
         SessionMode turnMode = Mode;
         submittingTurn = true;
+        Review.SetRunning(true);
         OnPropertyChanged(nameof(CanChangeMode));
         try
         {
-            if (CurrentConversation == null) await NewConversationAsync();
-            if (disposed || CurrentConversation == null) return;
+            if (CurrentConversation == null) await StartConversationAsync(false);
+            if (disposed || generation != workspaceGeneration || CurrentConversation == null) return;
             await dispatcher.InvokeAsync(() =>
             {
                 if (InputText == message) InputText = string.Empty;
@@ -175,7 +236,10 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
                 streamingAssistantMessage = null;
                 ErrorMessage = null;
             });
-            await client.SendAsync(message, lifetimeCancellation.Token, turnMode).ConfigureAwait(false);
+            string request = turnMode == SessionMode.Implement && planForImplementation != null
+                ? "Previously discussed plan:\n" + planForImplementation + "\n\nCurrent request:\n" + message : message;
+            planForImplementation = null;
+            await client.SendAsync(request, lifetimeCancellation.Token, turnMode).ConfigureAwait(false);
             await dispatcher.InvokeAsync(() =>
             {
                 if (CurrentConversation?.State != ConversationTurnState.Running) return;
@@ -189,7 +253,7 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
             await dispatcher.InvokeAsync(ApplyConnectionState).ConfigureAwait(false);
         }
         catch { await dispatcher.InvokeAsync(() => { ConnectionState = ChatConnectionState.Error; ErrorMessage = "Could not send the message to Codex."; StatusMessage = "Message failed."; }).ConfigureAwait(false); }
-        finally { await dispatcher.InvokeAsync(() => { submittingTurn = false; OnPropertyChanged(nameof(CanChangeMode)); }).ConfigureAwait(false); }
+        finally { await dispatcher.InvokeAsync(() => { submittingTurn = false; Review.SetRunning(IsTurnActive); RefreshCommands(); }).ConfigureAwait(false); }
     }
 
     public async Task CancelTurnAsync()
@@ -211,7 +275,7 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
     {
         UpdateUsageAccount(value);
         Authentication = value;
-        if (value.State == CodexAuthenticationState.Authenticated) { ConnectionState = ChatConnectionState.Ready; StatusMessage = "Connected and authenticated."; }
+        if (value.State == CodexAuthenticationState.Authenticated) { ConnectionState = ChatConnectionState.Ready; StatusMessage = "Connected and authenticated."; _ = LoadModelsAsync(); }
         else if (value.State == CodexAuthenticationState.AuthenticationRequired) { ConnectionState = ChatConnectionState.AuthenticationRequired; StatusMessage = "Sign in with your ChatGPT subscription to continue."; }
         else if (value.State == CodexAuthenticationState.Failed) { ConnectionState = ChatConnectionState.Error; ErrorMessage = value.ErrorMessage ?? "Codex authentication failed."; }
     });
@@ -228,7 +292,13 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
     private void OnClientEventReceived(object? sender, CodexEventArgs value) => Dispatch(() =>
     {
         if (value.Kind == "error") { usageAccount = null; Usage.SetSession(false); ConnectionState = ChatConnectionState.Error; ErrorMessage = value.Text; StatusMessage = "Disconnected from Codex."; }
-        else if (value.Kind == "diagnostic") StatusMessage = value.Text;
+        else if (value.Kind == "sandboxSetup")
+        {
+            StatusMessage = value.Text; ErrorMessage = null;
+            NeedsSandboxSetup = !value.Text.StartsWith("Windows sandbox ready",StringComparison.Ordinal);
+            OnPropertyChanged(nameof(NeedsSandboxSetup)); SetupSandboxCommand.RaiseCanExecuteChanged();
+        }
+        else if (value.Kind == "diagnostic") { StatusMessage = value.Text; if (CurrentConversation?.Worktree != null) Messages.Add(new ChatMessage("Activity",value.Text)); }
     });
 
     private void OnConversationEventReceived(object? sender, CodexConversationEventArgs value) => Dispatch(() =>
@@ -253,6 +323,7 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
                 plan.Content = value.Kind == CodexConversationEventKind.PlanCompleted ? value.Text ?? string.Empty : plan.Content + value.Text;
                 break;
             case CodexConversationEventKind.ToolActivity:
+                if (CurrentConversation.Worktree != null && value.Text != null) Messages.Add(new ChatMessage("Activity",value.Text));
                 streamingAssistantMessage = null;
                 Activity = value.Text ?? string.Empty;
                 break;
@@ -264,6 +335,11 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
             case CodexConversationEventKind.Disconnected:
                 ConnectionState = ChatConnectionState.Error; ErrorMessage = value.Text ?? "Codex turn failed."; StatusMessage = "Codex turn failed."; streamingAssistantMessage = null; break;
         }
+        if (value.Kind == CodexConversationEventKind.TurnCompleted || value.Kind == CodexConversationEventKind.TurnInterrupted || value.Kind == CodexConversationEventKind.TurnFailed || value.Kind == CodexConversationEventKind.Disconnected)
+        {
+            Review.SetRunning(false);
+            if (CurrentConversation.Worktree != null) _ = Review.RefreshAsync();
+        }
         OnPropertyChanged(nameof(CurrentConversation));
         OnPropertyChanged(nameof(IsTurnActive));
         RefreshCommands();
@@ -274,7 +350,14 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
     private void UpdateWorkspace(string? newWorkspacePath)
     {
         string normalized = string.IsNullOrWhiteSpace(newWorkspacePath) ? string.Empty : Path.GetFullPath(newWorkspacePath);
-        if (string.Equals(WorkspacePath, normalized, StringComparison.OrdinalIgnoreCase)) return;
+        string? file = workspaceContext.SolutionFilePath;
+        if (string.Equals(WorkspacePath,normalized,StringComparison.OrdinalIgnoreCase) && string.Equals(solutionFile,file,StringComparison.OrdinalIgnoreCase)) return;
+        if (IsTurnActive || submittingTurn) _ = InterruptObsoleteTurnAsync();
+        solutionFile = file;
+        Worktree.SetSolution(file);
+        Review.SetRunning(false);
+        workspaceGeneration++;
+        planForImplementation = null;
         WorkspacePath = normalized;
         Activity = string.Empty;
         CurrentConversation = null;
@@ -286,6 +369,32 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
         RefreshCommands();
     }
 
+    private async Task InterruptObsoleteTurnAsync()
+    {
+        try { await client.CancelAsync(lifetimeCancellation.Token).ConfigureAwait(false); }
+        catch { Dispatch(() => ErrorMessage = "The previous turn could not be interrupted. Its workspace remains isolated."); }
+    }
+
+    private void OnWorktreeChanged(object? sender, PropertyChangedEventArgs args)
+    {
+        Review.SetSession(Worktree.Session);
+        if (Worktree.Session == null && mode == SessionMode.Implement)
+        {
+            CurrentConversation = null; mode = SessionMode.Chat; planForImplementation = null; OnPropertyChanged(nameof(Mode));
+        }
+        OnPropertyChanged(nameof(Modes));
+        RefreshCommands();
+    }
+    private void OnReviewChanged(object? sender, PropertyChangedEventArgs args) => RefreshCommands();
+    private async Task LoadModelsAsync()
+    {
+        try
+        {
+            string[] models = await client.ListModelsAsync(lifetimeCancellation.Token).ConfigureAwait(false);
+            Dispatch(() => { foreach (string name in models) if (!Models.Contains(name)) Models.Add(name); });
+        }
+        catch { Dispatch(() => StatusMessage = "Model list unavailable. The CLI default is available."); }
+    }
     private void ApplyConnectionState()
     {
         Authentication = client.Authentication;
@@ -302,6 +411,9 @@ public sealed class CodexChatViewModel : INotifyPropertyChanged, IDisposable
         if (disposed) return;
         disposed = true;
         lifetimeCancellation.Cancel();
+        Worktree.PropertyChanged -= OnWorktreeChanged;
+        Review.PropertyChanged -= OnReviewChanged;
+        Worktree.Dispose(); Review.Dispose();
         client.UsageUpdated -= OnUsageUpdated;
         Usage.SetSession(false);
         client.EventReceived -= OnClientEventReceived;

@@ -26,11 +26,17 @@ public sealed class CodexChatToolWindow : ToolWindowPane
         IWorkspaceContext context = solution == null ? new EmptyWorkspaceContext() : new VisualStudioWorkspaceContext(solution);
         workspaceContext = context as IDisposable;
         client = new CodexAppServerClient();
+        client.ConfirmManagedCommandAsync = async command =>
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            string? directory = client.CurrentConversation?.WorkspaceDirectory;
+            return directory != null && new WorktreeCommandDialog(directory,command).ShowModal() == true;
+        };
         settings = new ShellSettingsManager(ServiceProvider.GlobalProvider).GetWritableSettingsStore(SettingsScope.UserSettings);
         settings.CreateCollection(SettingsCollection);
         string savedPolicy = settings.GetString(SettingsCollection, PolicySetting, ReadOnlyApprovalPolicy.Never);
         viewModel = new CodexChatViewModel(client, context, new WpfUiDispatcher(),
-            savedPolicy == ReadOnlyApprovalPolicy.Never ? ReadOnlyApprovalPolicy.Never : ReadOnlyApprovalPolicy.Untrusted);
+            savedPolicy == ReadOnlyApprovalPolicy.Never ? ReadOnlyApprovalPolicy.Never : ReadOnlyApprovalPolicy.Untrusted, editor: new VisualStudioReviewEditor());
         viewModel.PropertyChanged += SavePolicy;
         Content = new CodexChatView(viewModel);
     }

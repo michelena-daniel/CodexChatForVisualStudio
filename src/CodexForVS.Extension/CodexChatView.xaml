@@ -25,7 +25,7 @@
           <TextBlock Text="Mode" VerticalAlignment="Center" Margin="0,0,6,0" />
           <ComboBox AutomationProperties.Name="Conversation mode" ItemsSource="{Binding Modes}"
                     SelectedItem="{Binding Mode, Mode=TwoWay}" IsEnabled="{Binding CanChangeMode}"
-                    ToolTip="Plan a change or refine an existing plan in this conversation. Both modes are read-only." />
+                    ToolTip="Chat and Plan are read-only. Prepare a worktree to enable Implement." />
         </StackPanel>
         <StackPanel Orientation="Horizontal">
         <TextBlock Text="Approval policy" VerticalAlignment="Center" Margin="0,0,6,0" />
@@ -33,6 +33,8 @@
                   SelectedItem="{Binding ApprovalPolicy, Mode=TwoWay}" IsEnabled="{Binding CanChangePolicy}"
                   ToolTip="never runs sandbox-permitted commands. untrusted also blocks commands that need confirmation. Changing policy starts a fresh thread on your next send." />
         </StackPanel>
+        <TextBlock Text="Model" Margin="8,0,4,0" VerticalAlignment="Center" />
+        <ComboBox ItemsSource="{Binding Models}" SelectedItem="{Binding SelectedModel}" IsEnabled="{Binding CanChangeMode}" MinWidth="95" AutomationProperties.Name="Codex model" ToolTip="Use the CLI default or choose a model for the next thread." />
       </WrapPanel>
       <TextBlock Text="{Binding StatusMessage}" TextWrapping="Wrap" />
       <TextBlock Text="{Binding Activity}" TextWrapping="Wrap">
@@ -46,6 +48,36 @@
       </TextBlock>
       <TextBlock FontSize="11" Text="{Binding WorkspaceName}" />
       <TextBlock FontSize="11" Text="{Binding WorkspacePath}" TextTrimming="CharacterEllipsis" />
+      <Button HorizontalAlignment="Left" Margin="0,3" Padding="6,2" Content="Prepare worktree"
+              Command="{Binding Worktree.PrepareCommand}" ToolTip="Create a detached checkout of the current commit. Uncommitted changes and unsaved editor buffers are excluded." />
+      <TextBox Text="{Binding Worktree.Status, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap"
+               Padding="0" BorderThickness="0" Background="Transparent" Foreground="{DynamicResource {x:Static vs:EnvironmentColors.ToolWindowTextBrushKey}}">
+        <TextBox.Style>
+          <Style TargetType="TextBox">
+            <Style.Triggers>
+              <DataTrigger Binding="{Binding Worktree.Status}" Value=""><Setter Property="Visibility" Value="Collapsed" /></DataTrigger>
+            </Style.Triggers>
+          </Style>
+        </TextBox.Style>
+      </TextBox>
+      <Button Content="Set up Windows sandbox…" HorizontalAlignment="Left" Command="{Binding SetupSandboxCommand}" ToolTip="Start the official Codex setup. Windows may request administrator confirmation.">
+        <Button.Style><Style TargetType="Button"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers>
+          <DataTrigger Binding="{Binding NeedsSandboxSetup}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+        </Style.Triggers></Style></Button.Style>
+      </Button>
+      <Expander Header="Review worktree changes" DataContext="{Binding Review}">
+        <StackPanel>
+          <ListBox ItemsSource="{Binding Changes}" SelectedItem="{Binding Selected}" DisplayMemberPath="Description" MaxHeight="145" AutomationProperties.Name="Proposed file changes" />
+          <WrapPanel>
+            <Button Content="Refresh" Command="{Binding Refresh}" Padding="5,2" />
+            <Button Content="Open diff" Command="{Binding Preview}" Padding="5,2" />
+            <Button Content="Edit proposal" Command="{Binding Edit}" Padding="5,2" />
+            <Button Content="Accept file" Command="{Binding Accept}" Padding="5,2" />
+            <Button Content="Discard file" Command="{Binding Discard}" Padding="5,2" />
+          </WrapPanel>
+          <TextBlock Text="{Binding Status}" TextWrapping="Wrap" />
+        </StackPanel>
+      </Expander>
       <TextBlock FontWeight="SemiBold" Text="{Binding ErrorMessage}" TextWrapping="Wrap" />
     </StackPanel>
     <Border Grid.Row="2" BorderBrush="{DynamicResource {x:Static SystemColors.ControlDarkBrushKey}}" BorderThickness="1" CornerRadius="3">
@@ -82,7 +114,7 @@
     </DockPanel>
     <StackPanel Grid.Row="5" Margin="0,4,0,0" DataContext="{Binding Usage}">
       <WrapPanel>
-        <TextBlock VerticalAlignment="Center" Margin="0,0,8,0" Text="Read-only mode" />
+        <TextBlock VerticalAlignment="Center" Margin="0,0,8,0" Text="{Binding DataContext.Mode, RelativeSource={RelativeSource AncestorType=UserControl}}" />
         <ToggleButton x:Name="UsageToggle" Padding="6,2" ToolTip="Show or hide Codex usage"
                       AutomationProperties.Name="{Binding Summary}">
           <WrapPanel>

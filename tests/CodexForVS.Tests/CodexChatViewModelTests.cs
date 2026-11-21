@@ -13,6 +13,105 @@ namespace CodexForVS.Tests;
 public sealed class CodexChatViewModelTests
 {
     [Fact]
+    public async Task PreparationIsExplicitAndDuplicateClicksDoNotAllocateMoreSessions()
+    {
+        FakeClient client = new FakeClient(CodexAuthenticationState.Unknown);
+        FakeWorktreeService service = new FakeWorktreeService();
+        using CodexChatViewModel model = new CodexChatViewModel(client, new FakeWorkspaceContext(Workspace), new ImmediateDispatcher(), worktreeService: service);
+        Assert.Equal(0, service.Calls);
+        Task preparing = model.Worktree.PrepareCommand.ExecuteAsync();
+        await model.Worktree.PrepareCommand.ExecuteAsync();
+        Assert.Equal(1, service.Calls);
+        WorktreeSession session = new WorktreeSession(Workspace, Workspace, "recorded-base");
+        service.Result.SetResult(session);
+        await preparing;
+        Assert.Contains(session.BaseCommit, model.Worktree.Status);
+        Assert.Contains(session.WorktreePath, model.Worktree.Status);
+        Assert.False(model.Worktree.PrepareCommand.CanExecute(null!));
+        Assert.Equal(0, client.StartConversationCalls);
+    }
+
+    [Fact]
+    public async Task SolutionCloseCancelsPreparationAndIgnoresItsLateResult()
+    {
+        FakeWorkspaceContext workspace = new FakeWorkspaceContext(Workspace);
+        FakeWorktreeService service = new FakeWorktreeService();
+        using CodexChatViewModel model = new CodexChatViewModel(new FakeClient(CodexAuthenticationState.Unknown), workspace,
+            new ImmediateDispatcher(), worktreeService: service);
+        Task preparing = model.Worktree.PrepareCommand.ExecuteAsync();
+        workspace.SetWorkspace(null);
+        Assert.True(service.Token.IsCancellationRequested);
+        service.Result.SetResult(new WorktreeSession(Workspace, Workspace, "obsolete"));
+        await preparing;
+        Assert.Contains("saved solution", model.Worktree.Status);
+        Assert.False(model.Worktree.PrepareCommand.CanExecute(null!));
+    }
+
+    [Fact]
+    public async Task WorktreeDiscoveryFailureLeavesChatAndPlanAvailable()
+    {
+        FakeWorktreeService service = new FakeWorktreeService();
+        using CodexChatViewModel model = new CodexChatViewModel(new FakeClient(CodexAuthenticationState.Authenticated),
+            new FakeWorkspaceContext(Workspace), new ImmediateDispatcher(), worktreeService: service);
+        await model.ConnectAsync();
+        service.Result.SetException(new InvalidOperationException("The solution is outside a Git repository."));
+        await model.Worktree.PrepareCommand.ExecuteAsync();
+        Assert.Contains("outside a Git repository", model.Worktree.Status);
+        model.InputText = "What does this project do?";
+        Assert.True(model.SendMessageCommand.CanExecute(null!));
+        model.Mode = SessionMode.Plan;
+        Assert.True(model.SendMessageCommand.CanExecute(null!));
+        Assert.Null(model.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task ImplementRequiresPreparedSessionAndUsesSeparateThreadWithSelectedModelAndPlan()
+    {
+        FakeWorktreeService service = new FakeWorktreeService();
+        FakeWorkspaceContext workspace = new FakeWorkspaceContext(Workspace);
+        FakeClient client = new FakeClient(CodexAuthenticationState.Authenticated);
+        using CodexChatViewModel model = new CodexChatViewModel(client,workspace,new ImmediateDispatcher(),worktreeService:service);
+        await model.ConnectAsync();
+        model.Mode = SessionMode.Implement;
+        Assert.Equal(SessionMode.Chat,model.Mode);
+        model.SelectedModel = "test-model";
+        model.Mode = SessionMode.Plan;
+        model.InputText = "Plan the change.";
+        await model.SendMessageAsync();
+        model.Messages.Add(new ChatMessage("Plan","Update the greeting."));
+        client.CompleteCurrentTurn("completed");
+        WorktreeSession session = new WorktreeSession(Workspace,Workspace,"base");
+        service.Result.SetResult(session);
+        await model.Worktree.PrepareCommand.ExecuteAsync();
+        model.Mode = SessionMode.Implement;
+        model.InputText = "Implement that.";
+        await model.SendMessageAsync();
+        Assert.Equal(2,client.StartConversationCalls);
+        Assert.Equal(session.WorktreePath,model.CurrentConversation!.WorkspaceDirectory);
+        Assert.Equal("test-model",client.LastModel);
+        Assert.Contains("Update the greeting.",client.SentMessages[1]);
+        Assert.Equal(SessionMode.Implement,client.SentModes[1]);
+        workspace.SetWorkspace(null);
+        Assert.Null(model.Worktree.Session);
+        Assert.Null(model.CurrentConversation);
+        Assert.Equal(SessionMode.Chat,model.Mode);
+        Assert.False(model.SendMessageCommand.CanExecute(null!));
+    }
+
+    private sealed class FakeWorktreeService : IWorktreeService
+    {
+        internal int Calls { get; private set; }
+        internal CancellationToken Token { get; private set; }
+        internal TaskCompletionSource<WorktreeSession> Result { get; } = new TaskCompletionSource<WorktreeSession>(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<WorktreeSession> PrepareAsync(string solutionFile, Action<WorktreeSession> onProgress, CancellationToken cancellationToken)
+        {
+            Calls++;
+            Token = cancellationToken;
+            return Result.Task;
+        }
+    }
+
+    [Fact]
     public async Task SwitchingToPlanKeepsDiscussionAndRendersEachPlanItemOnce()
     {
         FakeClient client = new FakeClient(CodexAuthenticationState.Authenticated);
@@ -313,6 +412,7 @@ public sealed class CodexChatViewModelTests
     {
         public FakeWorkspaceContext(string? workspacePath) { WorkspacePath = workspacePath; }
         public string? WorkspacePath { get; private set; }
+        public string? SolutionFilePath => WorkspacePath == null ? null : Path.Combine(WorkspacePath, "Example.sln");
         public event EventHandler? WorkspaceChanged;
         public void SetWorkspace(string? workspacePath) { WorkspacePath = workspacePath; WorkspaceChanged?.Invoke(this, EventArgs.Empty); }
     }
@@ -341,12 +441,16 @@ public sealed class CodexChatViewModelTests
         public event EventHandler<CodexConversationEventArgs>? ConversationEventReceived;
         public Task StartAsync(CancellationToken cancellationToken) { AuthenticationChanged?.Invoke(this, Authentication); return Task.CompletedTask; }
         public Task<CodexLoginRequest> SignInAsync(CancellationToken cancellationToken) => Task.FromResult(new CodexLoginRequest("login", "https://example.test/login"));
-        public Task<CodexConversation> StartConversationAsync(string workspaceDirectory, CancellationToken cancellationToken, string approvalPolicy = ReadOnlyApprovalPolicy.Never)
+        public Task SetupWindowsSandboxAsync(WorktreeSession session,CancellationToken token) => Task.CompletedTask;
+        public Task<string[]> ListModelsAsync(CancellationToken token) => Task.FromResult(new[] { "test-model" });
+        public Task<CodexConversation> StartConversationAsync(string workspaceDirectory, CancellationToken cancellationToken, string approvalPolicy = ReadOnlyApprovalPolicy.Never, WorktreeSession? worktree = null, string? model = null)
         {
+            LastModel = model;
             StartConversationCalls++;
             CurrentConversation = new CodexConversation("thread-" + StartConversationCalls, workspaceDirectory, approvalPolicy);
             return ThreadStart ?? Task.FromResult(CurrentConversation);
         }
+        public string? LastModel { get; private set; }
         public List<SessionMode> SentModes { get; } = new List<SessionMode>();
         public Task SendAsync(string text, CancellationToken cancellationToken, SessionMode mode = SessionMode.Chat)
         {

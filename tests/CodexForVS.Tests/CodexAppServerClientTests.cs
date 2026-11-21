@@ -56,6 +56,19 @@ public sealed class CodexAppServerClientTests
     }
 
     [Fact]
+    public async Task ModelPickerReadsEveryVisibleProviderModelWithoutStartingATurn()
+    {
+        FakeTransport transport = new FakeTransport();
+        transport.Reply = (method,p) => method == "model/list" ? ((string?)p["cursor"] == null
+            ? JObject.Parse("{data:[{model:'first'},{model:'hidden',hidden:true}],nextCursor:'two'}")
+            : JObject.Parse("{data:[{model:'second'},{model:'first'}],nextCursor:null}")) : null;
+        using CodexAppServerClient client = new CodexAppServerClient(transport);
+        await client.StartAsync(default);
+        Assert.Equal(new[] { "first","second" },await client.ListModelsAsync(default));
+        Assert.DoesNotContain(transport.Requests,r=>r.Method=="turn/start");
+    }
+
+    [Fact]
     public async Task NativePlanEventsAreCorrelatedAndFileApprovalIsDeclined()
     {
         FakeTransport transport = new FakeTransport();
@@ -96,12 +109,13 @@ public sealed class CodexAppServerClientTests
 
             Assert.Equal("initialize", transport.Requests[0].Method);
             Assert.Equal("account/read", transport.Requests[1].Method);
-            Assert.Equal("thread/start", transport.Requests[2].Method);
-            Assert.Equal("openai", (string?)transport.Requests[2].Parameters["modelProvider"]);
-            Assert.Equal(Workspace, (string?)transport.Requests[2].Parameters["cwd"]);
-            Assert.Equal("read-only", (string?)transport.Requests[2].Parameters["sandbox"]);
-            Assert.Equal(expected, (string?)transport.Requests[2].Parameters["approvalPolicy"]);
-            Assert.Equal("account/read", transport.Requests[3].Method);
+            JObject start = Assert.Single(transport.Requests, r => r.Method == "thread/start").Parameters;
+            Assert.Equal("openai", (string?)start["modelProvider"]);
+            Assert.Equal(Workspace, (string?)start["cwd"]);
+            Assert.Equal("read-only", (string?)start["sandbox"]);
+            Assert.Equal(expected, (string?)start["approvalPolicy"]);
+            Assert.False((bool)start["config"]!["features.shell_tool"]!);
+            Assert.Equal("account/read", transport.Requests[transport.Requests.Count - 2].Method);
             Request turn = Assert.Single(transport.Requests, request => request.Method == "turn/start");
             Assert.Equal(expected, (string?)turn.Parameters["approvalPolicy"]);
             Assert.False((bool)turn.Parameters.SelectToken("sandboxPolicy.networkAccess")!);
@@ -367,7 +381,7 @@ public sealed class CodexAppServerClientTests
     private static JObject TurnCompleted(string threadId, string turnId, string status) => Notification("turn/completed", new JObject { ["threadId"] = threadId, ["turn"] = new JObject { ["id"] = turnId, ["status"] = status } });
     private static JObject UnauthenticatedAccount() => new JObject { ["requiresOpenaiAuth"] = true, ["account"] = JValue.CreateNull() };
 
-    private sealed class FakeTransport : IJsonRpcTransport
+    internal sealed class FakeTransport : IJsonRpcTransport
     {
         private int nextThread;
         private int nextTurn;
@@ -377,6 +391,7 @@ public sealed class CodexAppServerClientTests
         public JToken? ResponseId;
         public bool CancelLoginRequest { get; set; }
         public bool DeferTurnStarted { get; set; }
+        public Func<string,JObject,JObject?>? Reply { get; set; }
         public TaskCompletionSource<bool> ResponseReceived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         public JObject AccountResponse { get; set; } = new JObject { ["requiresOpenaiAuth"] = true, ["account"] = new JObject { ["type"] = "chatgpt", ["planType"] = "plus" } };
         public event EventHandler<JObject>? MessageReceived;
@@ -385,8 +400,10 @@ public sealed class CodexAppServerClientTests
         public Task<JObject> RequestAsync(string method, JObject parameters, CancellationToken cancellationToken)
         {
             Requests.Add(new Request(method, parameters));
+            if (Reply?.Invoke(method,parameters) is JObject result) return Task.FromResult(result);
             if (method == "account/rateLimits/read") return Task.FromResult(JObject.Parse(
                 "{ordinaryUsageAllowed:false,rateLimits:{limitId:'other'},rateLimitsByLimitId:{codex:{primary:{usedPercent:19,windowDurationMins:15,resetsAt:1700000000}}}}"));
+            if (method == "mcpServerStatus/list") return Task.FromResult(new JObject { ["data"] = new JArray() });
             if (method == "account/read") return Task.FromResult(AccountResponse);
             if (method == "account/login/start") return CancelLoginRequest ? Task.FromCanceled<JObject>(new CancellationToken(true)) : Task.FromResult(new JObject { ["type"] = "chatgpt", ["loginId"] = "login-1", ["authUrl"] = "https://example.test/login" });
             if (method == "thread/start") return Task.FromResult(new JObject { ["model"] = "thread-model", ["reasoningEffort"] = "medium", ["thread"] = new JObject { ["id"] = "thread-" + ++nextThread } });
@@ -399,13 +416,14 @@ public sealed class CodexAppServerClientTests
             return Task.FromResult(new JObject());
         }
         public Task NotifyAsync(string method, JObject parameters, CancellationToken cancellationToken) { Notifications.Add(method); return Task.CompletedTask; }
+        public Task RejectAsync(JToken id,CancellationToken token) => Task.CompletedTask;
         public Task RespondAsync(JToken id, JObject result, CancellationToken cancellationToken) { ResponseId = id; Response = result; ResponseReceived.TrySetResult(true); return Task.CompletedTask; }
         public void Emit(JObject message) => MessageReceived?.Invoke(this, message);
         public void RaiseFault(Exception error) => Faulted?.Invoke(this, error);
         public void Dispose() { }
     }
 
-    private sealed class Request
+    internal sealed class Request
     {
         public Request(string method, JObject parameters) { Method = method; Parameters = parameters; }
         public string Method { get; }

@@ -22,6 +22,7 @@ internal sealed class VisualStudioWorkspaceContext : IWorkspaceContext, IVsSolut
     }
 
     public string? WorkspacePath { get; private set; }
+    public string? SolutionFilePath { get; private set; }
     public event EventHandler? WorkspaceChanged;
 
     private void RefreshWorkspace()
@@ -29,7 +30,9 @@ internal sealed class VisualStudioWorkspaceContext : IWorkspaceContext, IVsSolut
         ThreadHelper.ThrowIfNotOnUIThread();
         ErrorHandler.ThrowOnFailure(solution.GetSolutionInfo(out string solutionDirectory, out string solutionFile, out string userOptionsFile));
         string? path = string.IsNullOrWhiteSpace(solutionFile) ? null : solutionDirectory;
-        if (string.Equals(WorkspacePath, path, StringComparison.OrdinalIgnoreCase)) return;
+        string? file = path == null ? null : Path.Combine(path, solutionFile);
+        if (string.Equals(SolutionFilePath, file, StringComparison.OrdinalIgnoreCase)) return;
+        SolutionFilePath = file;
         WorkspacePath = path;
         WorkspaceChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -42,8 +45,8 @@ internal sealed class VisualStudioWorkspaceContext : IWorkspaceContext, IVsSolut
     public int OnBeforeUnloadProject(IVsHierarchy realHierarchy, IVsHierarchy stubHierarchy) => VSConstants.S_OK;
     public int OnAfterOpenSolution(object reserved, int newSolution) { ThreadHelper.ThrowIfNotOnUIThread(); RefreshWorkspace(); return VSConstants.S_OK; }
     public int OnQueryCloseSolution(object reserved, ref int cancel) => VSConstants.S_OK;
-    public int OnBeforeCloseSolution(object reserved) { ThreadHelper.ThrowIfNotOnUIThread(); WorkspacePath = null; WorkspaceChanged?.Invoke(this, EventArgs.Empty); return VSConstants.S_OK; }
-    public int OnAfterCloseSolution(object reserved) { ThreadHelper.ThrowIfNotOnUIThread(); WorkspacePath = null; WorkspaceChanged?.Invoke(this, EventArgs.Empty); return VSConstants.S_OK; }
+    public int OnBeforeCloseSolution(object reserved) { ThreadHelper.ThrowIfNotOnUIThread(); WorkspacePath = SolutionFilePath = null; WorkspaceChanged?.Invoke(this, EventArgs.Empty); return VSConstants.S_OK; }
+    public int OnAfterCloseSolution(object reserved) { ThreadHelper.ThrowIfNotOnUIThread(); WorkspacePath = SolutionFilePath = null; WorkspaceChanged?.Invoke(this, EventArgs.Empty); return VSConstants.S_OK; }
 
     public void Dispose()
     {

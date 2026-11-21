@@ -32,6 +32,7 @@ public static class ReadOnlyApprovalPolicy
 public sealed class CodexConversation
 {
     public CodexConversation(string threadId, string workspaceDirectory, string approvalPolicy = ReadOnlyApprovalPolicy.Never) { ThreadId = threadId ?? throw new ArgumentNullException(nameof(threadId)); WorkspaceDirectory = workspaceDirectory ?? throw new ArgumentNullException(nameof(workspaceDirectory)); ApprovalPolicy = ReadOnlyApprovalPolicy.Validate(approvalPolicy); State = ConversationTurnState.Idle; }
+    internal WorktreeSession? Worktree { get; set; }
     public string ApprovalPolicy { get; }
     public string ThreadId { get; }
     public string WorkspaceDirectory { get; }

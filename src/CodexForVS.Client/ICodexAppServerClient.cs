@@ -17,11 +17,17 @@ public interface ICodexAppServerClient : System.IDisposable
     Task<CodexUsageSnapshot> ReadUsageAsync(CancellationToken cancellationToken);
     event EventHandler<CodexUsageSnapshot>? UsageUpdated;
     Task<CodexLoginRequest> SignInAsync(CancellationToken cancellationToken);
-    Task<CodexConversation> StartConversationAsync(string workspaceDirectory, CancellationToken cancellationToken, string approvalPolicy = ReadOnlyApprovalPolicy.Never);
+    Task SetupWindowsSandboxAsync(WorktreeSession session,CancellationToken token);
+    Task<string[]> ListModelsAsync(CancellationToken token);
+    Task<CodexConversation> StartConversationAsync(string workspaceDirectory, CancellationToken cancellationToken, string approvalPolicy = ReadOnlyApprovalPolicy.Never, WorktreeSession? worktree = null, string? model = null);
     Task SendAsync(string text, CancellationToken cancellationToken, SessionMode mode = SessionMode.Chat);
     Task CancelAsync(CancellationToken cancellationToken);
     event EventHandler<CodexEventArgs>? EventReceived;
     event EventHandler<CodexAuthenticationInfo>? AuthenticationChanged;
     event EventHandler<CodexConversationEventArgs>? ConversationEventReceived;
+}
+public sealed class SandboxSetupRequiredException : InvalidOperationException
+{
+    internal SandboxSetupRequiredException() : base("Codex requires Windows sandbox setup. Select Set up Windows sandbox, then retry Implement.") { }
 }
 public sealed class CodexEventArgs : System.EventArgs { public CodexEventArgs(string kind,string text) { Kind=kind; Text=text; } public string Kind { get; } public string Text { get; } }

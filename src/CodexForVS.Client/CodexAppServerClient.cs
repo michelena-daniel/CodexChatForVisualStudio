@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Linq;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using CodexForVS.Core;
@@ -15,6 +17,7 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
     private ICodexProcess? process;
     private readonly bool ownsProcess;
     private IJsonRpcTransport? transport;
+    private readonly WorktreeCommand worktreeCommand = new WorktreeCommand();
     private bool started;
     private bool disposed;
     private CodexAuthenticationInfo authentication = new CodexAuthenticationInfo(CodexAuthenticationState.Unknown);
@@ -71,7 +74,7 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
         {
             await activeTransport.RequestAsync("initialize", new JObject
             {
-                ["clientInfo"] = new JObject { ["name"] = "codex_for_visual_studio", ["title"] = "Codex for Visual Studio", ["version"] = "0.1.11" },
+                ["clientInfo"] = new JObject { ["name"] = "codex_for_visual_studio", ["title"] = "Codex for Visual Studio", ["version"] = "0.1.14" },
                 ["capabilities"] = new JObject { ["experimentalApi"] = true }
             }, cancellationToken).ConfigureAwait(false);
             await activeTransport.NotifyAsync("initialized", new JObject(), cancellationToken).ConfigureAwait(false);
@@ -107,17 +110,78 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
         finally { loginGate.Release(); }
     }
 
-    public async Task<CodexConversation> StartConversationAsync(string workspaceDirectory, CancellationToken cancellationToken, string approvalPolicy = ReadOnlyApprovalPolicy.Never)
+    public async Task SetupWindowsSandboxAsync(WorktreeSession session,CancellationToken token)
+    {
+        await session.Review.VerifyAsync().ConfigureAwait(false);
+        await RequireTransport().RequestAsync("windowsSandbox/setupStart",new JObject { ["mode"] = "elevated", ["cwd"] = session.WorktreePath },token).ConfigureAwait(false);
+    }
+
+    public async Task<string[]> ListModelsAsync(CancellationToken token)
+    {
+        List<string> names = new List<string>();
+        HashSet<string> cursors = new HashSet<string>(StringComparer.Ordinal);
+        string? cursor = null;
+        do
+        {
+            JObject page = await RequireTransport().RequestAsync("model/list", new JObject { ["modelProvider"] = "openai", ["cursor"] = cursor }, token).ConfigureAwait(false);
+            foreach (JObject entry in (page["data"] as JArray ?? throw new InvalidDataException("Missing Codex model list.")).OfType<JObject>())
+                if ((bool?)entry["hidden"] != true && (string?)entry["model"] is string model && !string.IsNullOrWhiteSpace(model)) names.Add(model);
+            cursor = (string?)page["nextCursor"];
+        } while (cursor != null && cursors.Add(cursor));
+        return names.Distinct(StringComparer.Ordinal).ToArray();
+    }
+
+
+
+    public Func<string,Task<bool>>? ConfirmManagedCommandAsync { get; set; }
+
+    public async Task<CodexConversation> StartConversationAsync(string workspaceDirectory, CancellationToken cancellationToken, string approvalPolicy = ReadOnlyApprovalPolicy.Never, WorktreeSession? worktree = null, string? model = null)
     {
         if (Authentication.State != CodexAuthenticationState.Authenticated) throw new InvalidOperationException("Authenticate with Codex before starting a conversation.");
+        ConversationTurnState? previous = CurrentConversation?.State;
+        if (previous == ConversationTurnState.Starting || previous == ConversationTurnState.Running || previous == ConversationTurnState.Cancelling)
+            throw new InvalidOperationException("The previous turn is still active. Wait for it to finish or cancel it.");
         if (string.IsNullOrWhiteSpace(workspaceDirectory)) throw new ArgumentException("A workspace directory is required.", nameof(workspaceDirectory));
         string fullWorkspaceDirectory = Path.GetFullPath(workspaceDirectory);
         if (!Directory.Exists(fullWorkspaceDirectory)) throw new DirectoryNotFoundException("The configured workspace directory does not exist.");
-        JObject response = await RequireTransport().RequestAsync("thread/start", CreateThreadStartParameters(fullWorkspaceDirectory, ReadOnlyApprovalPolicy.Validate(approvalPolicy)), cancellationToken).ConfigureAwait(false);
+        JObject parameters = CreateThreadStartParameters(fullWorkspaceDirectory, ReadOnlyApprovalPolicy.Validate(approvalPolicy));
+        if (!string.IsNullOrWhiteSpace(model)) { parameters["model"] = model; parameters["allowProviderModelFallback"] = false; }
+        if (worktree != null)
+        {
+            if ((worktree.State != WorktreeState.Ready && worktree.State != WorktreeState.ReviewReady) || !string.Equals(worktree.WorktreePath,fullWorkspaceDirectory,StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Implementation requires the prepared worktree.");
+            JObject readiness = await RequireTransport().RequestAsync("windowsSandbox/readiness",new JObject(),cancellationToken).ConfigureAwait(false);
+            if ((string?)readiness["status"] != "ready") throw new SandboxSetupRequiredException();
+            await worktree.Review.VerifyAsync().ConfigureAwait(false);
+
+            parameters["sandbox"] = "workspace-write";
+            parameters["runtimeWorkspaceRoots"] = new JArray(fullWorkspaceDirectory);
+            parameters["approvalsReviewer"] = "user";
+
+            parameters["developerInstructions"] = "Implement the user\u0027s request only in the detached worktree. Use worktree_command to inspect files and run commands with developer confirmation. Leave the final files for review. Do not stage, commit, alter Git metadata, contact external services or request elevation.";
+        }
+        await CodexThreadTools.ConfigureAsync(RequireTransport(),parameters,worktree != null,cancellationToken).ConfigureAwait(false);
+        JObject response = await RequireTransport().RequestAsync("thread/start", parameters, cancellationToken).ConfigureAwait(false);
         string? threadId = (string?)response.SelectToken("thread.id");
         if (string.IsNullOrWhiteSpace(threadId)) throw new InvalidOperationException("Codex did not return a thread ID.");
+        if (model != null && (string?)response["model"] != model) throw new InvalidOperationException("Codex could not use the selected model.");
+        if (worktree != null)
+        {
+            string root = worktree.WorktreePath;
+            bool SamePath(string? candidate) => !string.IsNullOrEmpty(candidate) && string.Equals(Path.GetFullPath(candidate!),root,StringComparison.OrdinalIgnoreCase);
+            if (!SamePath((string?)response["cwd"]) || (string?)response.SelectToken("sandbox.type") != "workspaceWrite" ||
+                (bool?)response.SelectToken("sandbox.networkAccess") == true || (string?)response["approvalPolicy"] != approvalPolicy ||
+                (bool?)response.SelectToken("sandbox.excludeSlashTmp") != true || (bool?)response.SelectToken("sandbox.excludeTmpdirEnvVar") != true ||
+                (string?)response["approvalsReviewer"] != "user" ||
+                !(response["runtimeWorkspaceRoots"] is JArray roots) || roots.Count != 1 || !SamePath((string?)roots[0]) ||
+                !(response.SelectToken("sandbox.writableRoots") is JArray writable) || writable.Any(path => !SamePath((string?)path)))
+                throw new InvalidOperationException("Codex did not confirm the isolated worktree sandbox.");
+
+        }
+        await CodexThreadTools.VerifyAsync(RequireTransport(),threadId!,cancellationToken).ConfigureAwait(false);
         CodexConversation newConversation = new CodexConversation(threadId!, fullWorkspaceDirectory, approvalPolicy)
         {
+            Worktree = worktree,
             Model = (string?)response["model"],
             ReasoningEffort = (string?)response["reasoningEffort"]
         };
@@ -131,11 +195,13 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
     public async Task SendAsync(string text, CancellationToken cancellationToken, SessionMode mode = SessionMode.Chat)
     {
         if (string.IsNullOrWhiteSpace(text)) throw new ArgumentException("A message is required.", nameof(text));
-        if (mode != SessionMode.Plan && mode != SessionMode.Chat) throw new ArgumentOutOfRangeException(nameof(mode));
+        if (mode != SessionMode.Plan && mode != SessionMode.Chat && mode != SessionMode.Implement) throw new ArgumentOutOfRangeException(nameof(mode));
         await turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             CodexConversation activeConversation = RequireConversation();
+            if ((mode == SessionMode.Implement) != (activeConversation.Worktree != null)) throw new ArgumentOutOfRangeException(nameof(mode),"Start a dedicated worktree conversation for Implement.");
+
             if (activeConversation.State == ConversationTurnState.Starting || activeConversation.State == ConversationTurnState.Running || activeConversation.State == ConversationTurnState.Cancelling) throw new InvalidOperationException("The current conversation already has an active turn.");
             // Other Codex clients share the CLI login. Check its current type before model work.
             JObject account = await RequireTransport().RequestAsync("account/read", new JObject(), cancellationToken).ConfigureAwait(false);
@@ -145,6 +211,7 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
                 SetAuthentication(currentAccount);
                 throw new InvalidOperationException("Sign in with ChatGPT before sending a message.");
             }
+            if (activeConversation.Worktree != null) await activeConversation.Worktree.Review.BeforeImplementationAsync(cancellationToken).ConfigureAwait(false);
             activeConversation.State = ConversationTurnState.Starting;
             activeConversation.ErrorMessage = null;
             activeConversation.AssistantText = string.Empty;
@@ -189,6 +256,7 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
                 turnId = conversation.ActiveTurnId;
                 conversation.State = ConversationTurnState.Cancelling;
             }
+            worktreeCommand.StopAll();
             try { await RequireTransport().RequestAsync("turn/interrupt", new JObject { ["threadId"] = activeConversation.ThreadId, ["turnId"] = turnId }, cancellationToken).ConfigureAwait(false); }
             catch
             {
@@ -203,7 +271,7 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
         finally { turnGate.Release(); }
     }
 
-    private static JObject CreateThreadStartParameters(string workspaceDirectory, string approvalPolicy) => new JObject { ["cwd"] = workspaceDirectory, ["modelProvider"] = "openai", ["sandbox"] = "read-only", ["approvalPolicy"] = approvalPolicy, ["developerInstructions"] = "You are in the open Visual Studio solution directory. For questions about this repository, use the available read-only shell tools to list files and inspect relevant source and documentation here before answering. Cite the files you inspected. If a read fails, explain the specific obstacle. Never edit files, apply patches, or request elevated permissions. In Plan mode, use the conversation so far to propose or refine a plan. Identify relevant files, implementation steps, and how to verify the result. Ask any clarifying questions directly in chat." };
+    private static JObject CreateThreadStartParameters(string workspaceDirectory, string approvalPolicy) => new JObject { ["cwd"] = workspaceDirectory, ["modelProvider"] = "openai", ["sandbox"] = "read-only", ["approvalPolicy"] = approvalPolicy, ["developerInstructions"] = "You are in the open Visual Studio solution directory. For questions about this repository, use inspect_workspace to list directories and read relevant source files here. Use workspace_command for other read-only inspection as needed before answering. Cite the files you inspected. If a read fails, explain the specific obstacle. Never edit files, apply patches, or request elevated permissions. In Plan mode, use the conversation so far to propose or refine a plan. Identify relevant files, implementation steps, and how to verify the result. Ask any clarifying questions directly in chat." };
     private static JObject CreateTurnStartParameters(CodexConversation conversation, string text, SessionMode mode)
     {
         JObject parameters = new JObject
@@ -214,6 +282,13 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
             ["sandboxPolicy"] = new JObject { ["type"] = "readOnly", ["networkAccess"] = false },
             ["approvalPolicy"] = conversation.ApprovalPolicy
         };
+        if (mode == SessionMode.Implement)
+        {
+            string root = conversation.Worktree!.WorktreePath;
+            parameters["runtimeWorkspaceRoots"] = new JArray(root);
+            parameters["sandboxPolicy"] = WorktreeCommand.Sandbox(root);
+            parameters["approvalsReviewer"] = "user";
+        }
         // A collaboration mode persists on the server. Explicitly restore default on leaving Plan.
         if (mode == SessionMode.Plan || conversation.LastMode == SessionMode.Plan)
         {
@@ -235,7 +310,7 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
     private void AttachProcess(ICodexProcess value) { value.Exited += OnProcessExited; value.StandardErrorReceived += OnStandardErrorReceived; }
     private void AttachTransport(IJsonRpcTransport value) { value.MessageReceived += OnMessage; value.Faulted += OnTransportFaulted; }
     private void OnProcessExited(object? sender, EventArgs eventArgs) => HandleDisconnection("Codex App Server exited unexpectedly.");
-    private void OnStandardErrorReceived(object? sender, string line) => Publish("diagnostic", "Codex diagnostic: " + line);
+    private void OnStandardErrorReceived(object? sender, string line) { /* CLI stderr can contain environment values. Keep it outside the transcript. */ }
     private void OnTransportFaulted(object? sender, Exception error) => HandleDisconnection("Codex App Server connection ended.");
 
     private async void OnMessage(object? sender, JObject message)
@@ -243,11 +318,12 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
         try
         {
             string? method = (string?)message["method"];
-            JObject? parameters = (JObject?)message["params"];
+            JObject? parameters = message["params"] as JObject;
             if (method == null) return;
-            if (message["id"] is JToken id) { await HandleServerRequestAsync(method, id).ConfigureAwait(false); return; }
+            if (message["id"] is JToken id) { await HandleServerRequestAsync(method, id, parameters).ConfigureAwait(false); return; }
             switch (method)
             {
+                case "windowsSandbox/setupCompleted": Publish("sandboxSetup",(bool?)parameters?["success"] == true ? "Windows sandbox ready. Retry Implement." : "Windows sandbox setup did not complete. Retry setup."); break;
                 case "account/updated": SetAuthentication(ParseUpdatedAuthentication(parameters)); break;
                 case "account/rateLimits/updated":
                     if (CodexUsageSnapshot.Parse(parameters) is CodexUsageSnapshot usage) UsageUpdated?.Invoke(this, usage);
@@ -264,12 +340,56 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
         catch { Publish("error", "Unable to process a Codex event."); }
     }
 
-    private async Task HandleServerRequestAsync(string method, JToken id)
+    private async Task HandleServerRequestAsync(string method, JToken id, JObject? parameters)
     {
-        if (!ApprovalResponseFactory.TryCreateDenial(method, out JObject denial)) { Publish("diagnostic", "Unsupported server request denied: " + method); return; }
-        Publish("denied", "Request denied by M1 read-only policy.");
+        IJsonRpcTransport connection = RequireTransport();
+        CodexConversation? active = CurrentConversation;
+        bool MatchesActiveTurn() => active != null && !disposed && ReferenceEquals(active,CurrentConversation) &&
+            active.State == ConversationTurnState.Running && active.ThreadId == (string?)parameters?["threadId"] &&
+            active.ActiveTurnId != null && active.ActiveTurnId == (string?)parameters?["turnId"];
+        if (method == "item/tool/call")
+        {
+            JObject result = WorktreeCommand.Result(false,"Tool unavailable or turn ended.");
+            if (MatchesActiveTurn() && (string?)parameters?["tool"] == "inspect_workspace" &&
+                (string?)parameters?.SelectToken("arguments.path") is string path)
+            {
+                try
+                {
+                    int offset = (int?)parameters?.SelectToken("arguments.offset") ?? 0;
+                    string output = await Task.Run(() => WorkspaceInspection.Read(active!.WorkspaceDirectory,path,offset)).ConfigureAwait(false);
+                    result = MatchesActiveTurn() ? WorktreeCommand.Result(true,output) : WorktreeCommand.Result(false,"Turn ended.");
+                }
+                catch (FileNotFoundException) { result = MissingWorkspaceEntry(); }
+                catch (DirectoryNotFoundException) { result = MissingWorkspaceEntry(); }
+                catch (UnauthorizedAccessException) { result = WorktreeCommand.Result(false,"Windows denied read access to this workspace entry."); }
+                catch (InvalidDataException) { result = WorktreeCommand.Result(false,"This tool requires a text file and a nonnegative offset."); }
+                catch (ArgumentException) { result = WorktreeCommand.Result(false,"Use . for the workspace root or a path inside that directory."); }
+                catch (IOException) { result = WorktreeCommand.Result(false,"Could not safely open this workspace entry. Check the listed path; links, Git metadata and nested repositories are restricted."); }
+                catch { result = WorktreeCommand.Result(false,"The workspace inspection failed."); }
+            }
+            else if (MatchesActiveTurn() && (string?)parameters?["tool"] == (active!.Worktree == null ? "workspace_command" : "worktree_command") &&
+                parameters?.SelectToken("arguments.command") is JValue value && value.Type == JTokenType.String)
+            {
+                string command = (string)value!;
+                PublishConversation(new CodexConversationEventArgs(CodexConversationEventKind.ToolActivity,active!.ThreadId,active.ActiveTurnId,active.Worktree == null ? "Reading the workspace." : "Worktree command awaiting your decision."));
+                try { result = await worktreeCommand.RunAsync(connection,active,command,ConfirmManagedCommandAsync,MatchesActiveTurn).ConfigureAwait(false); }
+                catch { result = WorktreeCommand.Result(false,"The sandboxed command could not run. Use inspect_workspace with path . to list the workspace."); }
+            }
+            await connection.RespondAsync(id,result,CancellationToken.None).ConfigureAwait(false);
+            return;
+        }
+        if (!ApprovalResponseFactory.TryCreateDenial(method,out JObject denial))
+        {
+            await connection.RejectAsync(id,CancellationToken.None).ConfigureAwait(false);
+            Publish("diagnostic","Unsupported request declined: " + method);
+            return;
+        }
+        Publish("diagnostic",method + " declined.");
         try { await RequireTransport().RespondAsync(id, denial, CancellationToken.None).ConfigureAwait(false); } catch { Publish("error", "Unable to send the read-only denial response."); }
     }
+
+    private static JObject MissingWorkspaceEntry() => WorktreeCommand.Result(false,
+        "No entry exists at that workspace path. List . with inspect_workspace, then follow the returned directory names.");
 
     private void HandleAssistantDelta(JObject? parameters)
     {
@@ -321,6 +441,7 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
             "fileChange" => "File change",
             _ => "Tool call"
         };
+        if (activeConversation.Worktree != null && itemType == "commandExecution") label += " " + (string?)parameters?.SelectToken("item.command");
         string outcome = completed ? (string?)parameters?.SelectToken("item.status") switch
         {
             "declined" => "blocked by policy",
@@ -350,6 +471,7 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
             }
             else { conversation.State = ConversationTurnState.Completed; kind = CodexConversationEventKind.TurnCompleted; }
         }
+        worktreeCommand.StopAll();
         if (kind == CodexConversationEventKind.TurnCompleted) Publish("completed", string.Empty);
         PublishConversation(new CodexConversationEventArgs(kind, threadId, turnId, error));
     }
@@ -392,6 +514,7 @@ public sealed class CodexAppServerClient : ICodexAppServerClient
             if (process != null) { process.Exited -= OnProcessExited; process.StandardErrorReceived -= OnStandardErrorReceived; }
             transport = null; process = null;
         }
+        worktreeCommand.StopAll();
         transportToDispose?.Dispose(); processToDispose?.Dispose();
     }
 }
