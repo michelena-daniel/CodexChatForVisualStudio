@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    name: Windows build, tests and VSIX
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+      - name: Restore
+        run: dotnet restore CodexForVS.sln
+      - name: Build
+        run: dotnet build CodexForVS.sln -c Release --no-restore -warnaserror -v minimal
+      - name: Test
+        run: dotnet test CodexForVS.sln -c Release --no-build --no-restore -v minimal --blame-hang-timeout 30s
+      - name: Inspect VSIX
+        run: .\eng\Test-Vsix.ps1
+      - name: Upload installer
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: CodexForVS-VSIX
+          path: src/CodexForVS.Extension/bin/Release/net48/CodexForVS.Extension.vsix
+          if-no-files-found: error
+          retention-days: 7
